@@ -1,0 +1,29 @@
+{
+  "name": "sku-manager",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "ingest": "node ingest.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "launch": "node scripts/launch.js",
+    "onboard": "node scripts/onboard.js",
+    "publish": "node scripts/publish.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.3",
+    "better-sqlite3": "^13.0.2",
+    "exceljs": "^4.4.0",
+    "express": "^5.2.1",
+    "multer": "^2.2.0",
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^6.2.108",
+    "semver": "^7.6.0",
+    "tesseract.js": "^7.0.0"
+  }
+}

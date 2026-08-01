@@ -1,0 +1,78 @@
+/* ============================================================
+   SPU/SKU 两层结构追加样式(叠加在 styles.css 之上)
+   ============================================================ */
+
+/* 加宽抽屉:货号×参数对比表需要横向空间 */
+.drawer.wide { width: min(940px, 96vw); }
+.drawer.wide .table-wrap { overflow-x: auto; }
+
+/* 搜索命中的货号行 */
+tr.hit td { background: var(--accent-glow); }
+.hit-line {
+  font-size: 13px;
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  margin-top: 3px;
+}
+
+/* 通用参数 chips */
+.chip-row { display: flex; flex-wrap: wrap; gap: 7px; }
+.chip {
+  display: inline-block;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--panel-2);
+  font-size: 14px;
+  color: var(--fg);
+}
+.chip b {
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 0;
+  color: var(--fg-mute);
+  margin-right: 5px;
+  font-weight: 600;
+}
+
+/* 供应商卡片:工厂所在地 */
+.sc-loc {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13.5px;
+  color: var(--fg-dim);
+  margin-bottom: 9px;
+}
+.sc-loc svg { flex: none; opacity: 0.75; }
+.sc-loc .none { font-style: italic; color: var(--fg-mute); }
+
+/* 供应商主营类目标签:可点击,跳转到该供应商×该类目的产品 */
+.sc-cats { margin: 4px 0 12px; }
+.sc-cats .chip { font-size: 13px; padding: 3px 9px; }
+.chip-link { cursor: pointer; transition: all 150ms var(--ease); }
+.chip-link:hover {
+  border-color: var(--accent-line);
+  color: var(--accent-ink);
+  background: var(--accent-glow);
+}
+
+/* 自定义参数编辑器 */
+.attr-editor { margin-bottom: 4px; }
+.attr-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 7px;
+  margin-bottom: 7px;
+  align-items: center;
+}
+.attr-row .icon-btn { padding: 8px; }
+.add-attr-row { margin-top: 2px; }
+
+/* 货号表格里的编辑按钮别撑高行 */
+tbody td .btn-sm { padding: 4px 10px; font-size: 13px; }
+
+@media (max-width: 860px) {
+  .drawer.wide { width: 100vw; }
+  .attr-row { grid-template-columns: 1fr 1fr auto; }
+}

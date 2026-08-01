@@ -1,0 +1,11 @@
+node_modules/
+data/
+sku-manager-mac/
+inbox/*
+!inbox/.gitkeep
+archive/*
+!archive/.gitkeep
+.env*
+versions/
+dist/
+*.zip
