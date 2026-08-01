@@ -8,6 +8,7 @@ const settings = require('./lib/settings');
 const { probe } = require('./lib/aiClient');
 const { normalizeSku, groupKey } = require('./lib/normalize');
 const backup = require('./lib/backup');
+const updater = require('./lib/updater');
 
 const app = express();
 const PORT = process.env.PORT || 3300;
@@ -741,7 +742,7 @@ app.get('/api/settings', (req, res) => {
 
 app.put('/api/settings', (req, res) => {
   const b = req.body || {};
-  for (const key of ['ai_enabled', 'ai_base_url', 'ai_model', 'ai_timeout_ms']) {
+  for (const key of ['ai_enabled', 'ai_base_url', 'ai_model', 'ai_timeout_ms', 'update_repo']) {
     if (b[key] !== undefined) settings.set(key, b[key]);
   }
   res.json(settings.all());
@@ -785,6 +786,121 @@ app.get('/api/contracts', (req, res) => {
       .all()
   );
 });
+
+/* --------------------------- 自动更新 --------------------------- */
+
+/** 更新状态机(前端轮询 /api/version 取它做进度展示)。
+ *  state: idle | disabled | uptodate | available | downloading | verifying | extracting | installing | ready | restarting | error
+ */
+const updateState = {
+  state: 'idle',
+  percent: 0,
+  current: updater.currentVersion,
+  latest: null,
+  notes: null,
+  error: null,
+};
+
+/** 后台执行完整更新流程(下载→校验→解压→装依赖→切版本→重启)。 */
+async function runUpdateInBackground(repo) {
+  try {
+    updateState.state = 'checking';
+    updateState.error = null;
+    const info = await updater.checkUpdate(repo);
+    if (!info.ok) {
+      updateState.state = 'error';
+      updateState.error = info.error;
+      return;
+    }
+    updateState.current = info.current;
+    updateState.latest = info.latest;
+    updateState.notes = info.notes;
+    if (!info.hasUpdate) {
+      updateState.state = 'uptodate';
+      return;
+    }
+    const staged = await updater.stageUpdate(info, (p) => Object.assign(updateState, p));
+    if (!staged.ok) {
+      updateState.state = 'error';
+      updateState.error = '更新包就绪失败';
+      return;
+    }
+    updateState.state = 'restarting';
+    updateState.percent = 100;
+    updater.applyUpdate(staged.version);
+    // 给响应留出落盘时间,然后退出,由 apply-update.js 切版本并重启
+    setTimeout(() => process.exit(0), 800);
+  } catch (err) {
+    updateState.state = 'error';
+    updateState.error = err.message;
+  }
+}
+
+/** 版本信息 + 当前更新状态(前端轮询这个,不触发网络请求)。 */
+app.get('/api/version', (req, res) => {
+  res.json({
+    version: updater.currentVersion,
+    update_repo: settings.get('update_repo'),
+    update_state: updateState,
+  });
+});
+
+/** 手动检查更新(会访问 GitHub,由"检查更新"按钮触发)。 */
+app.get('/api/update/check', async (req, res) => {
+  const repo = settings.get('update_repo');
+  if (!repo) {
+    updateState.state = 'disabled';
+    return res.json({ ok: true, state: 'disabled', current: updater.currentVersion });
+  }
+  const info = await updater.checkUpdate(repo);
+  if (!info.ok) {
+    updateState.state = 'error';
+    updateState.error = info.error;
+    return res.status(200).json({ ok: false, state: 'error', error: info.error });
+  }
+  Object.assign(updateState, {
+    state: info.hasUpdate ? 'available' : 'uptodate',
+    current: info.current,
+    latest: info.latest,
+    notes: info.notes,
+    percent: info.hasUpdate ? 0 : 100,
+  });
+  res.json({ ok: true, ...info });
+});
+
+/** 触发更新(后台跑,立即返回;前端轮询 /api/version 看进度)。 */
+app.post('/api/update/apply', (req, res) => {
+  const repo = settings.get('update_repo');
+  if (!repo) return res.status(400).json({ ok: false, error: '未配置 update_repo' });
+  if (['checking', 'downloading', 'verifying', 'extracting', 'installing', 'restarting'].includes(updateState.state)) {
+    return res.status(409).json({ ok: false, error: '更新正在进行中' });
+  }
+  updateState.state = 'checking';
+  updateState.percent = 0;
+  updateState.error = null;
+  runUpdateInBackground(repo); // 不 await,立即返回
+  res.json({ ok: true, started: true });
+});
+
+// 启动后延迟检查一次,把结果放进 updateState(失败也不影响启动)
+setTimeout(async () => {
+  try {
+    const repo = settings.get('update_repo');
+    if (!repo) return;
+    const info = await updater.checkUpdate(repo);
+    if (info.ok) {
+      updateState.state = info.hasUpdate ? 'available' : 'uptodate';
+      updateState.current = info.current;
+      updateState.latest = info.latest;
+      updateState.notes = info.notes;
+    } else {
+      updateState.state = 'error';
+      updateState.error = info.error;
+    }
+  } catch {
+    /* 启动检查失败忽略 */
+  }
+}, 5000);
 
 app.listen(PORT, HOST, () => {
   console.log(`产品查询工具已启动: http://localhost:${PORT}`);

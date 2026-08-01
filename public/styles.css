@@ -726,3 +726,40 @@ td.thumb-cell { width: 46px; padding: 5px 8px 5px 13px; }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* -------------------------------- 自动更新 -------------------------------- */
+
+.update-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-left: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent-line); border-radius: 999px;
+  background: var(--accent-glow); color: var(--accent-ink);
+  font-family: var(--font-display); font-size: 13px; font-weight: 700;
+  cursor: pointer; white-space: nowrap;
+  animation: badge-pulse 2.4s ease-in-out infinite;
+  transition: transform 160ms var(--ease), box-shadow 160ms var(--ease);
+}
+.update-badge:hover { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.update-badge[hidden] { display: none; }
+@keyframes badge-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  50% { box-shadow: 0 0 0 5px rgba(229, 149, 0, 0.05); }
+}
+
+.update-progress { margin-top: 14px; }
+.update-progress-bar {
+  height: 8px; border-radius: 999px;
+  background: var(--raised); overflow: hidden;
+}
+.update-progress-fill {
+  height: 100%; width: 0;
+  background: linear-gradient(90deg, var(--accent-line), var(--accent));
+  border-radius: 999px;
+  transition: width 500ms var(--ease);
+}
+.update-progress-text {
+  margin-top: 7px; font-size: 12.5px; color: var(--fg-dim);
+  font-family: var(--font-mono);
+}
+.update-progress[hidden] { display: none; }

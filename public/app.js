@@ -1457,6 +1457,24 @@ async function renderSettings() {
     </div>
 
     <div class="panel" style="max-width:720px">
+      <div class="panel-title">自动更新</div>
+      <div class="spec-text" style="margin-bottom:14px">填一个<b>公开 GitHub 仓库</b>(owner/repo),启动时和手动检查都会比对最新 Release。有新版后点"下载并更新",服务会自动切换版本并重启,<b>数据(sku.db)不受影响</b>。</div>
+      <label class="field"><span>GitHub 仓库</span>
+        <input type="text" id="updateRepo" value="${esc(s.update_repo)}" placeholder="Drsakura/sku-manager" />
+      </label>
+      <div style="display:flex;gap:9px;margin-top:4px;flex-wrap:wrap">
+        <button class="btn" id="saveUpdate">保存</button>
+        <button class="btn" id="checkUpdate">检查更新</button>
+        <button class="btn btn-primary" id="applyUpdate" hidden>下载并更新</button>
+      </div>
+      <div id="updateResult" style="margin-top:14px"></div>
+      <div class="update-progress" id="updateProgress" hidden>
+        <div class="update-progress-bar"><div class="update-progress-fill" id="updateProgressFill"></div></div>
+        <div class="update-progress-text" id="updateProgressText"></div>
+      </div>
+    </div>
+
+    <div class="panel" style="max-width:720px">
       <div class="panel-title">Mac mini 那边要做什么</div>
       <div class="spec-text">1. 装 Tailscale,和这台 Windows 登同一个账号 —— 两台机器就在同一个私有网里了,不对公网暴露任何端口
 2. 装 Ollama,拉一个中文能力好的模型(Qwen 系列优先)
@@ -1478,6 +1496,7 @@ async function renderSettings() {
     </div>`;
 
   setupBackupPanel();
+  setupUpdatePanel();
 
   document.getElementById('saveAi').addEventListener('click', async () => {
     await api('/api/settings', {
@@ -1598,6 +1617,144 @@ async function refreshAiBadge() {
   } catch { /* 忽略 */ }
 }
 
+/* ---------------------------- 自动更新 ---------------------------- */
+
+const UPDATE_STATE_LABEL = {
+  idle: '等待中', disabled: '未配置', uptodate: '已是最新', available: '有新版本',
+  checking: '检查中', downloading: '下载中', verifying: '校验中',
+  extracting: '解压中', installing: '安装依赖中', ready: '就绪', restarting: '重启中', error: '出错',
+};
+
+let updateStateCache = { update_state: { state: 'idle' } };
+
+async function refreshVersion() {
+  try {
+    updateStateCache = await api('/api/version');
+  } catch { /* 后端未起时忽略 */ }
+  renderUpdateBadge();
+}
+
+function renderUpdateBadge() {
+  const badge = document.getElementById('updateBadge');
+  if (!badge) return;
+  const st = updateStateCache.update_state;
+  badge.hidden = !(st && st.state === 'available');
+}
+
+function setupUpdatePanel() {
+  const box = document.getElementById('updateResult');
+  const progressWrap = document.getElementById('updateProgress');
+  const progressFill = document.getElementById('updateProgressFill');
+  const progressText = document.getElementById('updateProgressText');
+  const applyBtn = document.getElementById('applyUpdate');
+  const repoInput = document.getElementById('updateRepo');
+
+  const repo = () => repoInput.value.trim();
+
+  document.getElementById('saveUpdate').addEventListener('click', async () => {
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ update_repo: repo() }),
+      });
+      toast('已保存');
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+    doCheck();
+  });
+
+  async function doCheck() {
+    box.innerHTML =
+      '<div class="result-row"><div class="spinner"></div><div class="result-name">正在检查更新…</div></div>';
+    applyBtn.hidden = true;
+    let r;
+    try {
+      r = await api('/api/update/check');
+    } catch (err) {
+      box.innerHTML = `<div class="result-row failed"><div class="result-name">${esc(err.message)}</div></div>`;
+      return;
+    }
+    if (!r.ok) {
+      box.innerHTML = `<div class="result-row failed"><div class="result-name">${esc(r.error || '检查失败')}</div></div>`;
+      return;
+    }
+    if (r.state === 'disabled') {
+      box.innerHTML =
+        '<div class="result-row"><div class="result-name">未配置仓库,先填 owner/repo 再保存</div></div>';
+      return;
+    }
+    if (r.hasUpdate) {
+      box.innerHTML = `<div class="result-row warn">
+        <div class="result-name">发现新版本 <b>v${esc(r.latest)}</b></div>
+        <div class="result-stat">当前 v${esc(r.current)}${r.published_at ? ' · 发布于 ' + fmtDate(r.published_at) : ''}</div>
+        <div class="col-report">${esc(r.notes || '(无发布说明)')}</div>
+      </div>`;
+      applyBtn.hidden = false;
+    } else {
+      box.innerHTML = `<div class="result-row ok"><div class="result-name">已是最新版本 v${esc(r.current)}</div></div>`;
+    }
+  }
+
+  document.getElementById('checkUpdate').addEventListener('click', doCheck);
+
+  applyBtn.addEventListener('click', async () => {
+    applyBtn.disabled = true;
+    applyBtn.textContent = '更新中…';
+    progressWrap.hidden = false;
+    try {
+      await api('/api/update/apply', { method: 'POST' });
+    } catch { /* 服务可能已开始重启,连接断开是正常的 */ }
+    pollProgress();
+  });
+
+  function pollProgress() {
+    api('/api/version')
+      .then((r) => {
+        const st = r.update_state || {};
+        if (st.state === 'restarting' || st.state === 'ready') {
+          progressFill.style.width = '100%';
+          progressText.textContent = '更新完成,服务重启中…';
+          waitServerUp();
+          return;
+        }
+        if (st.state === 'error') {
+          progressText.textContent = '更新失败:' + (st.error || '未知错误');
+          applyBtn.disabled = false;
+          applyBtn.textContent = '下载并更新';
+          return;
+        }
+        progressFill.style.width = (st.percent || 0) + '%';
+        progressText.textContent =
+          (UPDATE_STATE_LABEL[st.state] || st.state) + (st.percent ? ' ' + st.percent + '%' : '');
+        setTimeout(pollProgress, 1000);
+      })
+      .catch(() => {
+        progressText.textContent = '服务正在重启,等待重连…';
+        waitServerUp();
+      });
+  }
+
+  async function waitServerUp() {
+    for (let i = 0; i < 90; i++) {
+      try {
+        const r = await api('/api/version');
+        if (r.version) {
+          window.location.reload();
+          return;
+        }
+      } catch { /* 还没起来 */ }
+      await new Promise((res) => setTimeout(res, 2000));
+    }
+    toast('服务重启后未恢复,请手动重启', true);
+  }
+
+  // 进入设置页时已配置则自动查一次
+  if (repo()) doCheck();
+}
+
 /* --------------------------------- 启动 --------------------------------- */
 
 (async function init() {
@@ -1605,6 +1762,12 @@ async function refreshAiBadge() {
     await Promise.all([refreshStats(), loadSuppliers(), refreshAiBadge()]);
   } catch (err) {
     toast('无法连接后端服务:' + err.message, true);
+  }
+  document.getElementById('updateBadge')?.addEventListener('click', () => go('settings'));
+  await refreshVersion();
+  const st = updateStateCache.update_state;
+  if (st && st.state === 'available' && st.latest) {
+    toast(`发现新版本 v${st.latest},可在"设置与备份"里更新`);
   }
   go('search');
 })();
