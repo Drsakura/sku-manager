@@ -28,6 +28,9 @@ const archiver = require('archiver');
 const ROOT = path.join(__dirname, '..');
 const DIST_DIR = path.join(ROOT, 'dist');
 
+// macOS/Linux 启动脚本:入包时要单独打上可执行位
+const SHELL_ENTRIES = ['start.command'];
+
 // 支持从 <root>/.env 读 GITHUB_TOKEN / GITHUB_REPO / RELEASE_NOTES(该文件已 gitignore)
 (function loadEnv() {
   const envPath = path.join(ROOT, '.env');
@@ -203,8 +206,18 @@ function createZip(zipPath) {
         '.env.*',
         '*.zip',
         '.gitkeep',
+        // 单独入包以便设置可执行位(见下)
+        ...SHELL_ENTRIES,
       ],
     });
+
+    // Windows 文件系统没有执行位,glob 出来的 mode 是 0666。
+    // macOS 用户解压后要能直接双击,必须显式打上 0755。
+    for (const name of SHELL_ENTRIES) {
+      const p = path.join(ROOT, name);
+      if (fs.existsSync(p)) archive.file(p, { name, mode: 0o755 });
+    }
+
     archive.finalize();
   });
 }
