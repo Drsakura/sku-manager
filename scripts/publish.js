@@ -68,7 +68,9 @@ async function main() {
     const names = new AdmZip(zipPath).getEntries().map((e) => e.entryName);
     const leaked = names.filter((n) =>
       /^(data|archive|inbox|versions|dist|node_modules)\//.test(n) || /^\.env/.test(n) ||
-      /\.(db|xlsx|xls|pdf)$/i.test(n)
+      /\.(db|xlsx|xls|pdf)$/i.test(n) ||
+      // 本机状态文件:发出去会让别人的安装指向不存在的版本/路径
+      /^(current\.txt|config\.json)$/.test(n)
     );
 
     console.log(`>> 试跑打包: ${path.relative(ROOT, zipPath)}`);
@@ -206,6 +208,13 @@ function createZip(zipPath) {
         '.env.*',
         '*.zip',
         '.gitkeep',
+        // 本机状态/配置,绝不能跟着发布包走:
+        //   current.txt —— 开发机的当前版本号,发出去会让新装的机器
+        //                  去找一个不存在的 versions/<旧版本>/ 而启动失败
+        //   config.json —— 开发机的数据目录路径,发出去会把用户的数据
+        //                  指到一个他机器上不存在的位置
+        'current.txt',
+        'config.json',
         // 单独入包以便设置可执行位(见下)
         ...SHELL_ENTRIES,
       ],
