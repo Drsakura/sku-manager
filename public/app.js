@@ -1458,13 +1458,25 @@ async function renderSettings() {
 
     <div class="panel" style="max-width:720px">
       <div class="panel-title">自动更新</div>
-      <div class="spec-text" style="margin-bottom:14px">填一个<b>公开 GitHub 仓库</b>(owner/repo),启动时和手动检查都会比对最新 Release。有新版后点"下载并更新",服务会自动切换版本并重启,<b>数据(sku.db)不受影响</b>。</div>
+      <div class="spec-text" style="margin-bottom:14px">填一个 GitHub 仓库(owner/repo),启动时和手动检查都会比对最新 Release。有新版后点"下载并更新",服务会自动切换版本并重启,<b>数据(sku.db)不受影响</b>。</div>
       <label class="field"><span>GitHub 仓库</span>
         <input type="text" id="updateRepo" value="${esc(s.update_repo)}" placeholder="Drsakura/sku-manager" />
       </label>
+      <label class="field"><span>访问令牌 ${
+        s.update_token_set ? '<span class="badge badge-ok">已设置</span>' : '(仓库公开则留空)'
+      }</span>
+        <input type="password" id="updateToken" autocomplete="off"
+          placeholder="${s.update_token_set ? '已保存,留空则不改动' : '私有仓库需要,只读权限即可'}" />
+      </label>
+      <div class="spec-text" style="font-size:13px;color:var(--fg-mute);margin:-6px 0 12px">
+        令牌只存在本机数据库,不会进 git、不随更新包分发,也不会回传到这个页面。${
+          s.update_token_set ? '要清除请点「清除令牌」。' : ''
+        }
+      </div>
       <div style="display:flex;gap:9px;margin-top:4px;flex-wrap:wrap">
         <button class="btn" id="saveUpdate">保存</button>
         <button class="btn" id="checkUpdate">检查更新</button>
+        ${s.update_token_set ? '<button class="btn btn-danger" id="clearToken">清除令牌</button>' : ''}
         <button class="btn btn-primary" id="applyUpdate" hidden>下载并更新</button>
       </div>
       <div id="updateResult" style="margin-top:14px"></div>
@@ -1652,18 +1664,36 @@ function setupUpdatePanel() {
   const repo = () => repoInput.value.trim();
 
   document.getElementById('saveUpdate').addEventListener('click', async () => {
+    const tokenInput = document.getElementById('updateToken');
     try {
+      // 令牌留空 = 保持原样(后端不会覆盖),避免每次保存都要重输
       await api('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ update_repo: repo() }),
+        body: JSON.stringify({ update_repo: repo(), update_token: tokenInput.value }),
       });
+      tokenInput.value = '';
       toast('已保存');
     } catch (err) {
       toast(err.message, true);
       return;
     }
     doCheck();
+  });
+
+  document.getElementById('clearToken')?.addEventListener('click', async () => {
+    if (!confirm('清除已保存的访问令牌?\n\n清除后若仓库是私有的,将无法检查和下载更新。')) return;
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ update_token: null }),
+      });
+      toast('令牌已清除');
+      renderSettings();
+    } catch (err) {
+      toast(err.message, true);
+    }
   });
 
   async function doCheck() {

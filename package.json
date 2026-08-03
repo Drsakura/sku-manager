@@ -17,11 +17,11 @@
   "type": "commonjs",
   "dependencies": {
     "@napi-rs/canvas": "^1.0.3",
+    "adm-zip": "^0.5.16",
     "better-sqlite3": "^13.0.2",
     "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "multer": "^2.2.0",
-    "adm-zip": "^0.5.16",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^6.2.108",
     "semver": "^7.6.0",

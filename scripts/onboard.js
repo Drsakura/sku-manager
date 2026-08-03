@@ -40,21 +40,26 @@ if (fs.existsSync(destDir)) {
   process.exit(1);
 }
 
-// 复制(跳过会被 launch.js 重定向/版本管理占用的路径)
+// 复制(跳过会被 launch.js 重定向/版本管理占用的路径)。
+// 不能用 cpSync(ROOT, destDir):destDir 在 ROOT 内部,Node 禁止父目录拷进子目录。
 fs.mkdirSync(VERSIONS_DIR, { recursive: true });
 console.log('>> 复制代码(含 node_modules,可能较慢,只需一次)…');
-fs.cpSync(ROOT, destDir, {
-  recursive: true,
-  filter: (src) => {
-    const rel = path.relative(ROOT, src);
-    if (!rel) return true; // 根目录本身
-    const top = rel.split(path.sep)[0];
-    if (rel === 'current.txt') return false;
-    if (rel === 'package.json') return true;
-    if (top === 'node_modules') return true;
-    return !['data', 'versions', 'dist', '.git', 'inbox', 'archive'].includes(top);
-  },
-});
+const SKIP_DIRS = new Set(['data', 'versions', 'dist', '.git', 'inbox', 'archive', 'sku-manager-mac']);
+const SKIP_FILES = new Set(['current.txt']);
+const SKIP_PREFIX = ['.env']; // .env 与 .env.local 等
+fs.mkdirSync(destDir, { recursive: true });
+for (const ent of fs.readdirSync(ROOT, { withFileTypes: true })) {
+  const rel = ent.name;
+  if (ent.isDirectory()) {
+    if (SKIP_DIRS.has(rel)) continue;
+  } else {
+    if (SKIP_FILES.has(rel)) continue;
+    if (SKIP_PREFIX.some((p) => rel.startsWith(p)) || rel.endsWith('.zip')) continue;
+  }
+  const src = path.join(ROOT, rel);
+  const dest = path.join(destDir, rel);
+  fs.cpSync(src, dest, { recursive: true });
+}
 
 fs.writeFileSync(CURRENT_FILE, version + '\n', 'utf8');
 console.log(`>> 已写入 current.txt → v${version}`);

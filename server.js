@@ -736,8 +736,15 @@ app.post('/api/backup/restore', backupUpload.single('file'), async (req, res) =>
 
 /* --------------------------- 本地 AI 设置 --------------------------- */
 
+/** token 不回传前端,只回一个"是否已设置"的标记。 */
+function publicSettings() {
+  const s = settings.all();
+  const { update_token, ...rest } = s;
+  return { ...rest, update_token_set: !!update_token };
+}
+
 app.get('/api/settings', (req, res) => {
-  res.json(settings.all());
+  res.json(publicSettings());
 });
 
 app.put('/api/settings', (req, res) => {
@@ -745,7 +752,12 @@ app.put('/api/settings', (req, res) => {
   for (const key of ['ai_enabled', 'ai_base_url', 'ai_model', 'ai_timeout_ms', 'update_repo']) {
     if (b[key] !== undefined) settings.set(key, b[key]);
   }
-  res.json(settings.all());
+  // token 单独处理:前端传空字符串表示"不改",传 null 表示"清除"
+  if (b.update_token !== undefined) {
+    if (b.update_token === null) settings.set('update_token', '');
+    else if (String(b.update_token).trim()) settings.set('update_token', String(b.update_token).trim());
+  }
+  res.json(publicSettings());
 });
 
 app.post('/api/ai/probe', async (req, res) => {
@@ -806,7 +818,7 @@ async function runUpdateInBackground(repo) {
   try {
     updateState.state = 'checking';
     updateState.error = null;
-    const info = await updater.checkUpdate(repo);
+    const info = await updater.checkUpdate(repo, settings.get('update_token'));
     if (!info.ok) {
       updateState.state = 'error';
       updateState.error = info.error;
@@ -852,7 +864,7 @@ app.get('/api/update/check', async (req, res) => {
     updateState.state = 'disabled';
     return res.json({ ok: true, state: 'disabled', current: updater.currentVersion });
   }
-  const info = await updater.checkUpdate(repo);
+  const info = await updater.checkUpdate(repo, settings.get('update_token'));
   if (!info.ok) {
     updateState.state = 'error';
     updateState.error = info.error;
@@ -887,7 +899,7 @@ setTimeout(async () => {
   try {
     const repo = settings.get('update_repo');
     if (!repo) return;
-    const info = await updater.checkUpdate(repo);
+    const info = await updater.checkUpdate(repo, settings.get('update_token'));
     if (info.ok) {
       updateState.state = info.hasUpdate ? 'available' : 'uptodate';
       updateState.current = info.current;
