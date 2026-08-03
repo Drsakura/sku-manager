@@ -8,17 +8,9 @@ const { aiConfig } = require('./lib/settings');
 const { extractProducts } = require('./lib/aiClient');
 const { verifyRows } = require('./lib/verify');
 
-// 收件/归档目录默认为代码目录下的 inbox/archive;版本化安装时由 launch.js 用
-// SKU_INBOX_DIR/SKU_ARCHIVE_DIR 指到版本目录之外,避免每个版本重复拷贝合同文件。
-const INBOX_DIR = process.env.SKU_INBOX_DIR
-  ? path.resolve(process.env.SKU_INBOX_DIR)
-  : path.join(__dirname, 'inbox');
-const ARCHIVE_DIR = process.env.SKU_ARCHIVE_DIR
-  ? path.resolve(process.env.SKU_ARCHIVE_DIR)
-  : path.join(__dirname, 'archive');
-for (const dir of [INBOX_DIR, ARCHIVE_DIR]) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
+// 收件/归档目录统一由 lib/paths 解析(环境变量 > config.json > 默认),
+// 始终落在版本目录之外,更新只替换代码不会影响。
+const { INBOX_DIR, ARCHIVE_DIR } = require('./lib/paths');
 
 const SUPPORTED_EXT = new Set(['.xlsx', '.xls', '.pdf']);
 

@@ -16,7 +16,10 @@ const PORT = process.env.PORT || 3300;
 // data, and /api/scan reads arbitrary filesystem paths supplied by the client.
 const HOST = '127.0.0.1';
 
-const { IMAGE_DIR } = require('./lib/paths');
+const paths = require('./lib/paths');
+const { IMAGE_DIR } = paths;
+const appConfig = require('./lib/config');
+const agent = require('./lib/agent');
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -736,28 +739,87 @@ app.post('/api/backup/restore', backupUpload.single('file'), async (req, res) =>
 
 /* --------------------------- 本地 AI 设置 --------------------------- */
 
-/** token 不回传前端,只回一个"是否已设置"的标记。 */
+/** 密钥不回传前端,只回"是否已设置"的标记。 */
 function publicSettings() {
   const s = settings.all();
-  const { update_token, ...rest } = s;
-  return { ...rest, update_token_set: !!update_token };
+  const out = { ...s };
+  for (const k of settings.SECRET_KEYS) {
+    out[`${k}_set`] = !!s[k];
+    delete out[k];
+  }
+  return out;
 }
 
 app.get('/api/settings', (req, res) => {
   res.json(publicSettings());
 });
 
+const PLAIN_SETTING_KEYS = [
+  'ai_enabled', 'ai_provider', 'ai_base_url', 'ai_model', 'ai_timeout_ms',
+  'ai_cloud_preset', 'ai_cloud_base_url', 'ai_cloud_model',
+  'update_repo', 'update_auto_check',
+];
+
 app.put('/api/settings', (req, res) => {
   const b = req.body || {};
-  for (const key of ['ai_enabled', 'ai_base_url', 'ai_model', 'ai_timeout_ms', 'update_repo']) {
+  for (const key of PLAIN_SETTING_KEYS) {
     if (b[key] !== undefined) settings.set(key, b[key]);
   }
-  // token 单独处理:前端传空字符串表示"不改",传 null 表示"清除"
-  if (b.update_token !== undefined) {
-    if (b.update_token === null) settings.set('update_token', '');
-    else if (String(b.update_token).trim()) settings.set('update_token', String(b.update_token).trim());
+  // 密钥单独处理:传空字符串 = 不改动(避免每次保存都要重输);传 null = 清除
+  for (const key of settings.SECRET_KEYS) {
+    if (b[key] === undefined) continue;
+    if (b[key] === null) settings.set(key, '');
+    else if (String(b[key]).trim()) settings.set(key, String(b[key]).trim());
   }
   res.json(publicSettings());
+});
+
+/** 对话式查询:模型只做意图识别和组织语言,数字全部来自真实查询。 */
+app.post('/api/agent/ask', async (req, res) => {
+  const cfg = settings.aiConfig();
+  if (!cfg.baseUrl) {
+    return res.status(400).json({ error: '还没配置 AI —— 到「设置与备份」里选本地或云端接口' });
+  }
+  try {
+    res.json(await agent.ask(req.body?.question));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* --------------------------- 存储路径设置 --------------------------- */
+
+app.get('/api/paths', (req, res) => {
+  const cfg = appConfig.read();
+  res.json({
+    current: { data: paths.DATA_DIR, archive: paths.ARCHIVE_DIR, inbox: paths.INBOX_DIR },
+    configured: { dataDir: cfg.dataDir || '', archiveDir: cfg.archiveDir || '', inboxDir: cfg.inboxDir || '' },
+    configFile: appConfig.configPath(),
+    // 环境变量优先级高于配置文件,被覆盖时界面要提示
+    envOverride: {
+      data: !!process.env.SKU_DATA_DIR,
+      archive: !!process.env.SKU_ARCHIVE_DIR,
+      inbox: !!process.env.SKU_INBOX_DIR,
+    },
+  });
+});
+
+app.put('/api/paths', (req, res) => {
+  const b = req.body || {};
+  const patch = {};
+  for (const [key, label] of [['dataDir', '数据保存路径'], ['archiveDir', '合同归档目录'], ['inboxDir', '收件目录']]) {
+    if (b[key] === undefined) continue;
+    const v = String(b[key] || '').trim();
+    if (v) {
+      const chk = appConfig.checkDir(v);
+      if (!chk.ok) return res.status(400).json({ error: `${label}:${chk.error}` });
+      patch[key] = chk.resolved;
+    } else {
+      patch[key] = ''; // 空 = 恢复默认
+    }
+  }
+  appConfig.write(patch);
+  res.json({ ok: true, restartRequired: true, configFile: appConfig.configPath() });
 });
 
 app.post('/api/ai/probe', async (req, res) => {
