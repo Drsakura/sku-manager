@@ -83,8 +83,10 @@ const VIEWS = {
   search: { title: '产品查询', sub: '按货号、品名、规格、材质或参数检索产品与采购价', render: renderSearch },
   suppliers: { title: '供应商管理', sub: '联系人、地址与供货清单', render: renderSuppliers },
   import: { title: '合同导入', sub: '拖入合同文件,或扫描指定文件夹批量解析', render: renderImport },
-  settings: { title: '设置与备份', sub: '本地 AI 兜底解析 · 整库导出导入,换设备直接搬', render: renderSettings },
 };
+
+// 设置不再占一个页面视图 —— 齿轮打开弹窗,内容独立滚动,不带动整页
+document.getElementById('gearBtn').addEventListener('click', () => openSettings());
 
 function go(view) {
   state.view = view;
@@ -1196,12 +1198,16 @@ async function renderImport() {
     <div class="panel">
       <div class="panel-title">方式二 · 扫描指定文件夹</div>
       <div class="note">${ICON.alert}<div>扫描是<b>只读</b>的:只会读取文件夹里的合同来提取价格,<b>不会移动、改名或删除你的原始档案</b>。</div></div>
-      <div style="display:flex;gap:9px;align-items:flex-end;flex-wrap:wrap">
-        <label class="field grow" style="flex:1;min-width:280px;margin-bottom:0">
-          <span>文件夹路径</span>
-          <input type="text" id="scanPath" placeholder="例如 D:\\公司档案\\进货合同\\2026" />
-        </label>
-        <label class="check" style="padding-bottom:9px"><input type="checkbox" id="scanRecursive" /> 含子文件夹</label>
+      <label class="field" style="margin-bottom:11px">
+        <span>合同所在文件夹</span>
+        <div class="path-row">
+          <input type="text" id="scanPath" placeholder="点右边「浏览…」选择,或直接粘贴路径" />
+          <button class="btn" id="scanBrowse">浏览…</button>
+        </div>
+      </label>
+      <div style="display:flex;gap:9px;align-items:center;flex-wrap:wrap">
+        <label class="check"><input type="checkbox" id="scanRecursive" /> 含子文件夹</label>
+        <span style="flex:1"></span>
         <button class="btn" id="previewBtn">先看有多少文件</button>
         <button class="btn btn-primary" id="scanBtn">开始扫描</button>
       </div>
@@ -1286,6 +1292,8 @@ async function uploadFiles(fileList) {
 }
 
 function setupScan() {
+  attachFolderPicker(document.getElementById('scanPath'), document.getElementById('scanBrowse'));
+
   document.getElementById('previewBtn').addEventListener('click', async () => {
     const path = document.getElementById('scanPath').value.trim();
     if (!path) return toast('请先填写文件夹路径', true);
@@ -1417,140 +1425,579 @@ async function loadContractLog() {
 
 /* ================================ 本地 AI ================================ */
 
-async function renderSettings() {
-  const s = await api('/api/settings');
-  const on = s.ai_enabled === '1';
+/* ============================ 文件夹选择器 ============================ */
 
-  content.innerHTML = `
-    <div class="panel" style="max-width:720px">
-      <div class="panel-title">整库备份与迁移</div>
-      <div class="spec-text" style="margin-bottom:14px">导出会把<b>全部产品、货号、价格、调价历史、供应商、自定义参数和产品图片</b>打包进<b>一个 .db 文件</b>。
-换设备时把这个文件导进去,新机器就是原样的库 —— 不用管图片文件夹,图片也在里面。</div>
-      <div style="display:flex;gap:9px;flex-wrap:wrap">
-        <button class="btn btn-primary" id="exportBtn">导出备份文件</button>
-        <label class="btn" id="importBtn">导入备份文件
-          <input type="file" id="restoreInput" accept=".db" style="display:none" /></label>
+const FOLDER_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+const DRIVE_ICON =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>';
+
+/**
+ * 浏览器拿不到本地绝对路径(webkitdirectory 只给相对名),
+ * 所以走服务端目录接口,让用户点着选。
+ * @returns {Promise<string|null>} 选中的绝对路径,取消则 null
+ */
+function pickFolder(startPath) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'modal-backdrop';
+    backdrop.style.zIndex = '60';
+    const box = document.createElement('div');
+    box.className = 'picker';
+    document.body.append(backdrop, box);
+
+    let cur = startPath || '';
+
+    const done = (val) => {
+      backdrop.remove();
+      box.remove();
+      document.removeEventListener('keydown', onKey);
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        done(null);
+      }
+    };
+    backdrop.addEventListener('click', () => done(null));
+    document.addEventListener('keydown', onKey);
+
+    async function load(p) {
+      const list = document.getElementById('pickerList');
+      list.innerHTML = '<div class="picker-empty">读取中…</div>';
+      let r;
+      try {
+        r = await api('/api/fs/list?path=' + encodeURIComponent(p || ''));
+      } catch (err) {
+        list.innerHTML = `<div class="picker-empty">${esc(err.message)}</div>`;
+        return;
+      }
+      cur = r.path || '';
+      document.getElementById('pickerCur').textContent = cur || '选择一个位置';
+      document.getElementById('pickerUp').disabled = r.parent === null;
+      document.getElementById('pickerChoose').disabled = !cur;
+      document.getElementById('pickerNew').disabled = !cur;
+
+      let html = '';
+      if (!cur) {
+        // 顶层:先给常用位置,再给盘符
+        if (r.shortcuts?.length) {
+          html += '<div class="picker-sep">常用位置</div>';
+          html += r.shortcuts
+            .map(
+              (s) =>
+                `<div class="picker-item shortcut" data-path="${esc(s.path)}">${FOLDER_ICON}${esc(s.name)}</div>`
+            )
+            .join('');
+        }
+        html += '<div class="picker-sep">此电脑</div>';
+        html += r.roots
+          .map((d) => `<div class="picker-item" data-path="${esc(d.path)}">${DRIVE_ICON}${esc(d.name)}</div>`)
+          .join('');
+      } else if (r.readError) {
+        html = `<div class="picker-empty">${esc(r.readError)}</div>`;
+      } else if (!r.entries.length) {
+        html = '<div class="picker-empty">这个文件夹里没有子文件夹<br />可以直接点「选择此处」</div>';
+      } else {
+        html = r.entries
+          .map((e) => `<div class="picker-item" data-path="${esc(e.path)}">${FOLDER_ICON}${esc(e.name)}</div>`)
+          .join('');
+      }
+      list.innerHTML = html;
+      list.scrollTop = 0;
+      list.querySelectorAll('.picker-item').forEach((it) => {
+        it.addEventListener('click', () => load(it.dataset.path));
+      });
+    }
+
+    box.innerHTML = `
+      <div class="picker-head">
+        <h3 style="flex:1">选择文件夹</h3>
+        <button class="icon-btn" id="pickerClose" title="取消">${ICON.close}</button>
       </div>
-      <div id="backupResult" style="margin-top:14px"></div>
+      <div class="picker-bar">
+        <button class="btn btn-sm" id="pickerUp">← 上一级</button>
+        <button class="btn btn-sm" id="pickerRoot">此电脑</button>
+        <span class="picker-cur" id="pickerCur"></span>
+      </div>
+      <div class="picker-list" id="pickerList"></div>
+      <div class="picker-foot">
+        <button class="btn btn-sm" id="pickerNew">新建文件夹</button>
+        <span style="flex:1"></span>
+        <button class="btn" id="pickerCancel">取消</button>
+        <button class="btn btn-primary" id="pickerChoose">选择此处</button>
+      </div>`;
+
+    box.querySelector('#pickerClose').addEventListener('click', () => done(null));
+    box.querySelector('#pickerCancel').addEventListener('click', () => done(null));
+    box.querySelector('#pickerChoose').addEventListener('click', () => done(cur));
+    box.querySelector('#pickerRoot').addEventListener('click', () => load(''));
+    box.querySelector('#pickerUp').addEventListener('click', async () => {
+      const r = await api('/api/fs/list?path=' + encodeURIComponent(cur)).catch(() => null);
+      load(r ? r.parent ?? '' : '');
+    });
+    box.querySelector('#pickerNew').addEventListener('click', async () => {
+      const name = prompt('新文件夹名称:');
+      if (!name) return;
+      try {
+        const r = await api('/api/fs/mkdir', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ parent: cur, name }),
+        });
+        load(r.path);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    load(startPath || '');
+  });
+}
+
+/** 给一个输入框挂上「浏览…」按钮。 */
+function attachFolderPicker(input, btn) {
+  btn.addEventListener('click', async () => {
+    const start = input.value.trim() || input.placeholder?.trim() || '';
+    const picked = await pickFolder(start);
+    if (picked) input.value = picked;
+  });
+}
+
+/* ============================== 设置弹窗 ============================== */
+
+const SETTINGS_SECTIONS = [
+  {
+    id: 'ai',
+    label: 'AI 接入',
+    icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4M9 4h6"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg>',
+  },
+  {
+    id: 'paths',
+    label: '存储位置',
+    icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  },
+  {
+    id: 'backup',
+    label: '备份迁移',
+    icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>',
+  },
+  {
+    id: 'update',
+    label: '版本更新',
+    icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>',
+  },
+];
+
+let settingsSection = 'ai';
+
+/** 设置改为弹窗:内容独立滚动,不会带动整页。 */
+async function openSettings(section) {
+  if (section) settingsSection = section;
+  document.querySelectorAll('.modal-backdrop, .settings-modal').forEach((el) => el.remove());
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop';
+  const modal = document.createElement('div');
+  modal.className = 'settings-modal';
+  modal.id = 'settingsModal';
+  document.body.append(backdrop, modal);
+
+  const close = () => {
+    backdrop.remove();
+    modal.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => {
+    // 文件夹选择器开着时,Esc 先关它
+    if (e.key === 'Escape' && !document.querySelector('.picker')) close();
+  };
+  backdrop.addEventListener('click', close);
+  document.addEventListener('keydown', onKey);
+
+  const hasUpdate = document.getElementById('versionChip')?.classList.contains('has-update');
+
+  modal.innerHTML = `
+    <div class="settings-head">
+      <div style="flex:1">
+        <h2>设置</h2>
+        <div class="sub">所有配置只存本机</div>
+      </div>
+      <button class="icon-btn" id="settingsClose" title="关闭">${ICON.close}</button>
+    </div>
+    <div class="settings-body">
+      <div class="settings-nav" id="settingsNav">
+        ${SETTINGS_SECTIONS.map(
+          (s) => `<button data-section="${s.id}" class="${s.id === settingsSection ? 'active' : ''}">
+            ${s.icon}${s.label}
+            ${s.id === 'update' && hasUpdate ? '<span class="nav-flag"></span>' : ''}
+          </button>`
+        ).join('')}
+      </div>
+      <div class="settings-content" id="settingsContent"></div>
+    </div>`;
+
+  modal.querySelector('#settingsClose').addEventListener('click', close);
+  modal.querySelectorAll('#settingsNav button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      settingsSection = btn.dataset.section;
+      modal.querySelectorAll('#settingsNav button').forEach((b) =>
+        b.classList.toggle('active', b === btn)
+      );
+      paintSettingsSection();
+    });
+  });
+
+  await paintSettingsSection();
+}
+
+async function paintSettingsSection() {
+  const box = document.getElementById('settingsContent');
+  if (!box) return;
+  box.innerHTML = '<div class="result-row"><div class="spinner"></div><div class="result-name">加载中…</div></div>';
+  box.scrollTop = 0;
+
+  const s = await api('/api/settings');
+
+  if (settingsSection === 'ai') {
+    box.innerHTML = sectionAiHtml(s);
+    setupAiPanel();
+  } else if (settingsSection === 'paths') {
+    box.innerHTML = `
+      <div class="settings-section-title">存储位置</div>
+      <div class="settings-section-desc">数据始终存在本机。改路径后<b>需要重启程序</b>才生效,留空 = 用默认位置。</div>
+      <div id="pathsBox"><div class="result-row"><div class="spinner"></div><div class="result-name">读取中…</div></div></div>`;
+    await setupPathsPanel();
+  } else if (settingsSection === 'backup') {
+    box.innerHTML = `
+      <div class="settings-section-title">备份与迁移</div>
+      <div class="settings-section-desc">
+        导出会把<b>全部产品、货号、价格、调价历史、供应商、自定义参数和产品图片</b>打包进<b>一个 .db 文件</b>。
+        换设备时把这个文件导进去,新机器就是原样的库 —— 图片也在里面,不用单独管。
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">导出 / 导入</div>
+        <div class="settings-actions">
+          <button class="btn btn-primary" id="exportBtn">导出备份文件</button>
+          <label class="btn" id="importBtn">导入备份文件
+            <input type="file" id="restoreInput" accept=".db" style="display:none" /></label>
+        </div>
+        <div id="backupResult" style="margin-top:14px"></div>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">安全说明</div>
+        <div class="spec-text">导入前会自动把当前库另存到 <code style="font-family:var(--font-mono)">data/backups/</code>,导错了能捞回来。
+
+备份文件<b>不含任何密钥</b>(GitHub 令牌、AI API Key 都会被剔除),可以放心传给另一台设备。</div>
+      </div>`;
+    setupBackupPanel();
+  } else if (settingsSection === 'update') {
+    box.innerHTML = sectionUpdateHtml(s);
+    setupUpdatePanel();
+  }
+}
+
+function sectionAiHtml(s) {
+  const on = s.ai_enabled === '1';
+  const isCloud = s.ai_provider === 'cloud';
+  return `
+    <div class="settings-section-title">AI 接入</div>
+    <div class="settings-section-desc">
+      解析<b>先走规则</b>,只有规则搞不定的合同(认不出表格、扫描件、一行没识别出来)才调用模型。
+      模型连不上会自动退回规则解析,<b>不会导致导入失败</b>。
     </div>
 
-    <div class="panel" style="max-width:720px">
-      <div class="panel-title">本地 AI 连接设置</div>
-      <div class="spec-text" style="margin-bottom:14px">解析<b>先走规则</b>,只有规则搞不定的合同(认不出表格、扫描件、一行没识别出来)才会调用模型。模型连不上时会自动退回规则解析,<b>不会导致导入失败</b>。</div>
-      <label class="check" style="margin-bottom:14px">
-        <input type="checkbox" id="aiEnabled" ${on ? 'checked' : ''} /> 启用本地 AI 兜底解析
+    <div class="settings-group">
+      <label class="check">
+        <input type="checkbox" id="aiEnabled" ${on ? 'checked' : ''} /> 启用 AI 兜底解析与对话查询
       </label>
-      <label class="field"><span>模型服务地址</span>
-        <input type="text" id="aiUrl" value="${esc(s.ai_base_url)}" placeholder="http://100.x.x.x:11434" />
-      </label>
-      <div class="grid-2">
+    </div>
+
+    <div class="settings-group">
+      <div class="settings-group-title">模型来源</div>
+      <div class="radio-cards">
+        <label class="radio-card ${isCloud ? '' : 'active'}" data-provider="local">
+          <div class="radio-card-title">
+            <input type="radio" name="aiProvider" value="local" ${isCloud ? '' : 'checked'} /> 本地模型
+          </div>
+          <div class="radio-card-desc">自己机器或内网上的 Ollama。<b>数据不出内网</b>,适合含机密的合同。</div>
+        </label>
+        <label class="radio-card ${isCloud ? 'active' : ''}" data-provider="cloud">
+          <div class="radio-card-title">
+            <input type="radio" name="aiProvider" value="cloud" ${isCloud ? 'checked' : ''} /> 云端接口
+          </div>
+          <div class="radio-card-desc">DeepSeek / OpenAI。效果好、免部署,但<b>合同全文会发给服务商</b>。</div>
+        </label>
+      </div>
+
+      <div id="localCfg" ${isCloud ? 'hidden' : ''}>
+        <label class="field"><span>Ollama 地址</span>
+          <input type="text" id="aiUrl" value="${esc(s.ai_base_url)}" placeholder="http://127.0.0.1:11434" /></label>
         <label class="field"><span>模型名称</span>
           <input type="text" id="aiModel" value="${esc(s.ai_model)}" placeholder="qwen2.5:14b" /></label>
-        <label class="field"><span>超时(秒)</span>
-          <input type="number" id="aiTimeout" min="10" value="${Math.round(Number(s.ai_timeout_ms) / 1000)}" /></label>
       </div>
-      <div style="display:flex;gap:9px;margin-top:4px">
-        <button class="btn" id="probeBtn">测试连接</button>
-        <button class="btn btn-primary" id="saveAi">保存</button>
+
+      <div id="cloudCfg" ${isCloud ? '' : 'hidden'}>
+        <div class="note">${ICON.alert}<div><b>合同全文会发送给服务商。</b>合同里通常含采购价、供应商信息,可能还有客户货号和客户专属要求 —— 这些往往受保密义务约束。用之前请确认公司政策允许,并核对对方的数据留存与训练条款。需要保密时请选本地模型。</div></div>
+        <label class="field"><span>服务商</span>
+          <select id="cloudPreset">
+            <option value="deepseek" ${s.ai_cloud_preset === 'deepseek' ? 'selected' : ''}>DeepSeek</option>
+            <option value="openai" ${s.ai_cloud_preset === 'openai' ? 'selected' : ''}>OpenAI</option>
+            <option value="custom" ${s.ai_cloud_preset === 'custom' ? 'selected' : ''}>自定义(OpenAI 兼容接口)</option>
+          </select></label>
+        <div class="grid-2">
+          <label class="field"><span>接口地址</span>
+            <input type="text" id="cloudUrl" value="${esc(s.ai_cloud_base_url)}" placeholder="留空用服务商默认" /></label>
+          <label class="field"><span>模型</span>
+            <input type="text" id="cloudModel" value="${esc(s.ai_cloud_model)}" placeholder="留空用服务商默认" /></label>
+        </div>
+        <label class="field"><span>API Key ${
+          s.ai_cloud_key_set ? '<span class="badge badge-ok">已设置</span>' : ''
+        }</span>
+          <input type="password" id="cloudKey" autocomplete="off"
+            placeholder="${s.ai_cloud_key_set ? '已保存,留空则不改动' : 'sk-…'}" /></label>
+        <div class="spec-text" style="font-size:13px;color:var(--fg-mute);margin:-6px 0 4px">
+          密钥只存本机数据库,不回传页面、不进备份文件、不进 git。
+        </div>
       </div>
-      <div id="probeResult" style="margin-top:14px"></div>
     </div>
 
-    <div class="panel" style="max-width:720px">
-      <div class="panel-title">自动更新</div>
-      <div class="spec-text" style="margin-bottom:14px">填一个 GitHub 仓库(owner/repo),启动时和手动检查都会比对最新 Release。有新版后点"下载并更新",服务会自动切换版本并重启,<b>数据(sku.db)不受影响</b>。</div>
+    <div class="settings-group">
+      <div class="settings-group-title">高级</div>
+      <label class="field" style="max-width:200px"><span>超时(秒)</span>
+        <input type="number" id="aiTimeout" min="10" value="${Math.round(Number(s.ai_timeout_ms) / 1000)}" /></label>
+    </div>
+
+    <div class="settings-actions">
+      <button class="btn btn-primary" id="saveAi">保存</button>
+      <button class="btn" id="probeBtn">测试连接</button>
+      ${s.ai_cloud_key_set ? '<button class="btn btn-danger" id="clearCloudKey">清除 API Key</button>' : ''}
+    </div>
+    <div id="probeResult" style="margin-top:14px"></div>
+
+    <div class="settings-group" style="margin-top:22px">
+      <div class="settings-group-title">安全底线</div>
+      <div class="spec-text">模型返回的每一行都会<b>回原文逐字校验</b>:货号必须在原文出现,价格必须在原文出现且落在合理区间。对不上的行直接丢弃,不会写进库。
+
+这样即使模型看错数字(把 ¥102.00 认成 ¥120.00),错误价格也进不来。</div>
+    </div>`;
+}
+
+function sectionUpdateHtml(s) {
+  return `
+    <div class="settings-section-title">版本更新</div>
+    <div class="settings-section-desc">
+      更新<b>只替换代码</b>,<code style="font-family:var(--font-mono)">data/</code> 目录原样不动。
+      数据库结构如有变化,新版本启动时会自动补列,旧数据能被直接接管。
+    </div>
+
+    <div class="settings-group">
+      <div class="settings-group-title">更新源</div>
       <label class="field"><span>GitHub 仓库</span>
-        <input type="text" id="updateRepo" value="${esc(s.update_repo)}" placeholder="Drsakura/sku-manager" />
-      </label>
+        <input type="text" id="updateRepo" value="${esc(s.update_repo)}" placeholder="Drsakura/sku-manager" /></label>
       <label class="field"><span>访问令牌 ${
         s.update_token_set ? '<span class="badge badge-ok">已设置</span>' : '(仓库公开则留空)'
       }</span>
         <input type="password" id="updateToken" autocomplete="off"
-          placeholder="${s.update_token_set ? '已保存,留空则不改动' : '私有仓库需要,只读权限即可'}" />
-      </label>
-      <div class="spec-text" style="font-size:13px;color:var(--fg-mute);margin:-6px 0 12px">
-        令牌只存在本机数据库,不会进 git、不随更新包分发,也不会回传到这个页面。${
-          s.update_token_set ? '要清除请点「清除令牌」。' : ''
-        }
-      </div>
-      <div style="display:flex;gap:9px;margin-top:4px;flex-wrap:wrap">
-        <button class="btn" id="saveUpdate">保存</button>
-        <button class="btn" id="checkUpdate">检查更新</button>
-        ${s.update_token_set ? '<button class="btn btn-danger" id="clearToken">清除令牌</button>' : ''}
-        <button class="btn btn-primary" id="applyUpdate" hidden>下载并更新</button>
-      </div>
-      <div id="updateResult" style="margin-top:14px"></div>
-      <div class="update-progress" id="updateProgress" hidden>
-        <div class="update-progress-bar"><div class="update-progress-fill" id="updateProgressFill"></div></div>
-        <div class="update-progress-text" id="updateProgressText"></div>
+          placeholder="${s.update_token_set ? '已保存,留空则不改动' : '私有仓库需要,只读权限即可'}" /></label>
+      <div class="spec-text" style="font-size:13px;color:var(--fg-mute);margin:-6px 0 4px">
+        令牌只存本机数据库,不进 git、不随更新包分发,也不会回传到这个页面。
       </div>
     </div>
 
-    <div class="panel" style="max-width:720px">
-      <div class="panel-title">Mac mini 那边要做什么</div>
-      <div class="spec-text">1. 装 Tailscale,和这台 Windows 登同一个账号 —— 两台机器就在同一个私有网里了,不对公网暴露任何端口
-2. 装 Ollama,拉一个中文能力好的模型(Qwen 系列优先)
-3. 让 Ollama 监听所有网卡,否则只有 Mac 本机能连
-4. 把 Tailscale 给 Mac 分配的地址(100. 开头)填到上面
-
-具体命令等你要装的时候我再给,这里先留着位置。</div>
+    <div class="settings-actions">
+      <button class="btn" id="saveUpdate">保存</button>
+      <button class="btn" id="checkUpdate">检查更新</button>
+      ${s.update_token_set ? '<button class="btn btn-danger" id="clearToken">清除令牌</button>' : ''}
+      <button class="btn btn-primary" id="applyUpdate" hidden>下载并更新</button>
     </div>
-
-    <div class="panel" style="max-width:720px">
-      <div class="panel-title">安全机制</div>
-      <div class="spec-text">模型返回的每一行都会<b>回原文逐字校验</b>:货号必须在原文出现,价格必须在原文出现且落在合理区间。
-对不上的行直接丢弃,不会写进价格库。
-
-品名和起订量如果原文找不到,只剔除该字段,保留价格行。
-描述不做逐字校验(它是对原文的重组),但它不参与报价计算。
-
-这样即使模型看错数字(比如把 ¥102.00 认成 ¥120.00),错误价格也进不了库。</div>
+    <div id="updateResult" style="margin-top:14px"></div>
+    <div class="update-progress" id="updateProgress" hidden>
+      <div class="update-progress-bar"><div class="update-progress-fill" id="updateProgressFill"></div></div>
+      <div class="update-progress-text" id="updateProgressText"></div>
     </div>`;
+}
 
-  setupBackupPanel();
-  setupUpdatePanel();
+/* ------------------------------ AI 设置面板 ------------------------------ */
+
+function currentProvider() {
+  return document.querySelector('input[name="aiProvider"]:checked')?.value || 'local';
+}
+
+function aiPayload() {
+  const provider = currentProvider();
+  const p = {
+    ai_enabled: document.getElementById('aiEnabled').checked ? '1' : '0',
+    ai_provider: provider,
+    ai_timeout_ms: String(Math.max(10, Number(document.getElementById('aiTimeout').value) || 180) * 1000),
+  };
+  if (provider === 'local') {
+    p.ai_base_url = document.getElementById('aiUrl').value.trim();
+    p.ai_model = document.getElementById('aiModel').value.trim();
+  } else {
+    p.ai_cloud_preset = document.getElementById('cloudPreset').value;
+    p.ai_cloud_base_url = document.getElementById('cloudUrl').value.trim();
+    p.ai_cloud_model = document.getElementById('cloudModel').value.trim();
+    p.ai_cloud_key = document.getElementById('cloudKey').value; // 空 = 不改动
+  }
+  return p;
+}
+
+function setupAiPanel() {
+  // 切换本地/云端:只显示对应那组配置
+  document.querySelectorAll('input[name="aiProvider"]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      const cloud = currentProvider() === 'cloud';
+      document.getElementById('localCfg').hidden = cloud;
+      document.getElementById('cloudCfg').hidden = !cloud;
+      document.querySelectorAll('.radio-card').forEach((c) =>
+        c.classList.toggle('active', (c.dataset.provider === 'cloud') === cloud)
+      );
+    });
+  });
 
   document.getElementById('saveAi').addEventListener('click', async () => {
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(aiPayload()),
+      });
+      const k = document.getElementById('cloudKey');
+      if (k) k.value = '';
+      toast('已保存');
+      refreshAiBadge();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  document.getElementById('clearCloudKey')?.addEventListener('click', async () => {
+    if (!confirm('清除已保存的 API Key?\n\n清除后云端解析和对话查询将无法使用。')) return;
     await api('/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ai_enabled: document.getElementById('aiEnabled').checked ? '1' : '0',
-        ai_base_url: document.getElementById('aiUrl').value.trim(),
-        ai_model: document.getElementById('aiModel').value.trim(),
-        ai_timeout_ms: String(Math.max(10, Number(document.getElementById('aiTimeout').value) || 180) * 1000),
-      }),
+      body: JSON.stringify({ ai_cloud_key: null }),
     });
-    toast('已保存');
-    refreshAiBadge();
+    toast('已清除');
+    paintSettingsSection();
   });
 
   document.getElementById('probeBtn').addEventListener('click', async () => {
     const box = document.getElementById('probeResult');
     box.innerHTML = '<div class="result-row"><div class="spinner"></div><div class="result-name">正在连接…</div></div>';
-    const r = await api('/api/ai/probe', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        base_url: document.getElementById('aiUrl').value.trim(),
-        model: document.getElementById('aiModel').value.trim(),
-      }),
-    });
+
+    // 先存再测:probe 走的是已保存的配置,否则测的是旧值
+    try {
+      await api('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(aiPayload()),
+      });
+      const k = document.getElementById('cloudKey');
+      if (k) k.value = '';
+    } catch (err) {
+      box.innerHTML = `<div class="result-row failed"><div class="result-name">${esc(err.message)}</div></div>`;
+      return;
+    }
+
+    const r = await api('/api/ai/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const isCloud = currentProvider() === 'cloud';
 
     if (!r.ok) {
       box.innerHTML = `<div class="result-row failed">
         <div class="result-name">连不上</div>
         <div class="result-stat" style="color:var(--warn)">${esc(r.error)}</div>
-        <div class="col-report">检查:Mac 是否开机 · Tailscale 两端是否都在线 · Ollama 是否以 OLLAMA_HOST=0.0.0.0 启动</div>
+        <div class="col-report">${
+          isCloud
+            ? '检查:API Key 是否正确 · 账户是否有余额 · 网络能否访问该服务商'
+            : '检查:Ollama 是否已启动 · 地址端口是否正确 · 跨机器访问需 OLLAMA_HOST=0.0.0.0'
+        }</div>
       </div>`;
       return;
     }
 
     box.innerHTML = `<div class="result-row ${r.modelInstalled ? 'ok' : 'warn'}">
       <div class="result-name">连接成功</div>
-      <div class="result-stat">${r.modelInstalled ? `模型 <b>${esc(r.model)}</b> 已就绪` : `<b style="color:var(--warn)">未找到模型 ${esc(r.model)}</b>`}</div>
-      <div class="col-report">已安装的模型:${r.models.length ? r.models.map(esc).join(' · ') : '(一个都没有,需要先 ollama pull)'}</div>
+      <div class="result-stat">${
+        r.modelInstalled ? `模型 <b>${esc(r.model)}</b> 可用` : `<b style="color:var(--warn)">未找到模型 ${esc(r.model)}</b>`
+      }</div>
+      <div class="col-report">可用模型:${
+        r.models.length ? r.models.slice(0, 12).map(esc).join(' · ') : (isCloud ? '(服务商未返回列表)' : '(一个都没有,需要先 ollama pull)')
+      }</div>
     </div>`;
+    refreshAiBadge();
+  });
+}
+
+/* ------------------------------ 存储路径面板 ------------------------------ */
+
+const PATH_FIELDS = [
+  ['dataDir', '数据保存路径', 'data', '数据库、产品图片、自动备份'],
+  ['archiveDir', '合同归档目录', 'archive', '导入过的合同原件存放处'],
+  ['inboxDir', '收件目录', 'inbox', '放进来的文件会被自动解析'],
+];
+
+async function setupPathsPanel() {
+  const box = document.getElementById('pathsBox');
+  if (!box) return;
+  let info;
+  try {
+    info = await api('/api/paths');
+  } catch (err) {
+    box.innerHTML = `<div class="result-row failed"><div class="result-name">${esc(err.message)}</div></div>`;
+    return;
+  }
+
+  box.innerHTML = `
+    ${PATH_FIELDS.map(
+      ([key, label, curKey, hint]) => `
+      <div class="settings-group">
+        <div class="settings-group-title">${label}${
+          info.envOverride[curKey] ? ' <span class="badge badge-warn">被环境变量覆盖</span>' : ''
+        }</div>
+        <div class="spec-text" style="font-size:13px;color:var(--fg-mute);margin-bottom:9px">${hint}</div>
+        <div class="path-row">
+          <input type="text" data-path="${key}" value="${esc(info.configured[key] || '')}"
+            placeholder="${esc(info.current[curKey])}" ${info.envOverride[curKey] ? 'disabled' : ''} />
+          <button class="btn" data-browse="${key}" ${info.envOverride[curKey] ? 'disabled' : ''}>浏览…</button>
+        </div>
+        <div class="spec-text" style="font-size:12.5px;color:var(--fg-mute);margin-top:7px">
+          当前实际使用:<code style="font-family:var(--font-mono)">${esc(info.current[curKey])}</code>
+        </div>
+      </div>`
+    ).join('')}
+    <div class="settings-actions">
+      <button class="btn btn-primary" id="savePaths">保存</button>
+    </div>
+    <div id="pathsResult" style="margin-top:12px"></div>`;
+
+  box.querySelectorAll('[data-browse]').forEach((btn) => {
+    if (btn.disabled) return;
+    attachFolderPicker(box.querySelector(`[data-path="${btn.dataset.browse}"]`), btn);
+  });
+
+  document.getElementById('savePaths').addEventListener('click', async () => {
+    const payload = {};
+    box.querySelectorAll('[data-path]').forEach((el) => {
+      if (!el.disabled) payload[el.dataset.path] = el.value.trim();
+    });
+    try {
+      const r = await api('/api/paths', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      document.getElementById('pathsResult').innerHTML = `<div class="result-row warn">
+        <div class="result-name">已保存,重启后生效</div>
+        <div class="result-stat">数据不会自动搬家 —— 若要沿用现有数据,请把原目录内容拷到新位置</div>
+        <div class="col-report">配置文件:${esc(r.configFile)}</div>
+      </div>`;
+    } catch (err) {
+      document.getElementById('pathsResult').innerHTML =
+        `<div class="result-row failed"><div class="result-name">${esc(err.message)}</div></div>`;
+    }
   });
 }
 
@@ -1622,10 +2069,300 @@ function setupBackupPanel() {
   });
 }
 
+/* ================================ 对话助手 ================================ */
+
+const CHAT_SAMPLES = [
+  '电缆钳剪多少钱',
+  '哪些套装里带测电笔',
+  '最近哪些产品调过价',
+  '华新供货哪些产品',
+  '最便宜的螺丝刀是哪个',
+];
+
+let chatHistory = [];
+
+/* ------------------------- 悬浮问一句(全局,右下角) ------------------------- */
+
+const chatFab = document.getElementById('chatFab');
+const chatWidget = document.getElementById('chatWidget');
+const chatLog = document.getElementById('chatLog');
+const chatInput = document.getElementById('chatInput');
+const chatSamples = document.getElementById('chatSamples');
+const chatExport = document.getElementById('chatExport');
+const chatExportMenu = document.getElementById('chatExportMenu');
+
+/** 最近一条带数据表(rows)的 AI 回复 —— 导出按钮只对它可用。 */
+function latestAiRows() {
+  for (let i = chatHistory.length - 1; i >= 0; i--) {
+    const m = chatHistory[i];
+    if (m.role === 'ai' && Array.isArray(m.rows) && m.rows.length) return m.rows;
+  }
+  return null;
+}
+
+function updateExportUi() {
+  const can = !!latestAiRows();
+  chatExport.disabled = !can;
+  chatExport.title = can ? '导出查询结果' : '先查一次,有结果才能导出';
+}
+
+function renderSamples() {
+  chatSamples.innerHTML = CHAT_SAMPLES.map((q) => `<span class="chat-sample">${esc(q)}</span>`).join('');
+}
+
+function openChat() {
+  chatWidget.hidden = false;
+  chatFab.hidden = true; // 小窗盖住 FAB,收起时再显示
+  chatWidget.classList.add('open');
+  chatLog.innerHTML = chatHistory.map(chatMsgHtml).join(''); // 以 history 为准重建,保证一致
+  renderSamples();
+  updateExportUi();
+  refreshAiBadge(); // 刷新头部 开/关 徽标
+  chatInput.focus();
+  scrollChatToEnd(chatLog);
+}
+
+function closeChat() {
+  chatWidget.classList.remove('open');
+  chatWidget.hidden = true;
+  chatFab.hidden = false;
+  chatExportMenu.hidden = true;
+}
+
+chatFab.addEventListener('click', openChat);
+document.getElementById('chatClose').addEventListener('click', closeChat);
+document.getElementById('chatSend').addEventListener('click', () => sendChat(chatInput.value, { log: chatLog, input: chatInput }));
+document.getElementById('chatClear').addEventListener('click', () => {
+  chatHistory = [];
+  chatLog.innerHTML = '';
+  updateExportUi();
+});
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChat(chatInput.value, { log: chatLog, input: chatInput });
+  }
+});
+chatSamples.addEventListener('click', (e) => {
+  const chip = e.target.closest('.chat-sample');
+  if (chip) sendChat(chip.textContent, { log: chatLog, input: chatInput });
+});
+
+// 导出:小菜单选格式 → POST /api/export → blob 触发下载
+chatExport.addEventListener('click', (e) => {
+  e.stopPropagation();
+  chatExportMenu.hidden = !chatExportMenu.hidden;
+});
+document.addEventListener('click', () => { chatExportMenu.hidden = true; });
+chatExportMenu.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const btn = e.target.closest('button[data-format]');
+  if (btn) exportTable(btn.dataset.format);
+});
+
+async function exportTable(format) {
+  const rows = latestAiRows();
+  if (!rows) { toast('没有可导出的查询结果', true); return; }
+  const columns = [...new Set(rows.flatMap((r) => Object.keys(r)))]; // 与 chatRowsHtml 同规则
+  const wasDisabled = chatExport.disabled;
+  chatExport.disabled = true;
+  try {
+    const res = await fetch('/api/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ format, columns, rows }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || `导出失败 (${res.status})`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const pad = (n) => String(n).padStart(2, '0');
+    const d = new Date();
+    a.download = `查询结果_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.${format}`;
+    a.href = url;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    chatExport.disabled = wasDisabled;
+  }
+}
+
+function chatMsgHtml(m) {
+  if (m.role === 'me') {
+    return `<div class="chat-msg me"><div class="chat-bubble">${esc(m.text)}</div></div>`;
+  }
+  const cls = m.error ? 'err' : 'ai';
+  const rows = m.rows && m.rows.length ? chatRowsHtml(m.rows) : '';
+  return `<div class="chat-msg ${cls}"><div class="chat-bubble">${esc(m.text)}</div>${rows}</div>`;
+}
+
+/** 把查询结果渲染成表格 —— 这才是报价依据。 */
+function chatRowsHtml(rows) {
+  const cols = [...new Set(rows.flatMap((r) => Object.keys(r)))];
+  return `<div class="chat-rows">
+    <div class="chat-rows-note">依据数据(${rows.length} 条,来自数据库实时查询):</div>
+    <div class="table-wrap"><table>
+      <thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${rows
+        .map(
+          (r) =>
+            `<tr>${cols
+              .map((c) => {
+                const v = r[c];
+                const isNum = typeof v === 'number';
+                return `<td class="${isNum ? 'num' : 'dim'}">${v === null || v === undefined || v === '' ? '—' : esc(v)}</td>`;
+              })
+              .join('')}</tr>`
+        )
+        .join('')}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function scrollChatToEnd(log) {
+  const el = log || document.getElementById('chatLog');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+async function sendChat(text, opts = {}) {
+  const q = String(text || '').trim();
+  if (!q) return;
+  const log = opts.log || document.getElementById('chatLog');
+  const input = opts.input || document.getElementById('chatInput');
+  if (!log || !input) return;
+
+  chatHistory.push({ role: 'me', text: q });
+  log.insertAdjacentHTML('beforeend', chatMsgHtml({ role: 'me', text: q }));
+  log.insertAdjacentHTML(
+    'beforeend',
+    '<div class="chat-msg ai" id="chatPending"><div class="chat-bubble"><span class="spinner" style="display:inline-block;vertical-align:-2px"></span> 正在查…</div></div>'
+  );
+  input.value = '';
+  scrollChatToEnd(log);
+
+  try {
+    const r = await api('/api/agent/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q }),
+    });
+    const msg = {
+      role: 'ai',
+      text: r.answer + (r.degraded ? '\n\n(模型不可用,以上为关键词搜索结果)' : ''),
+      rows: r.rows,
+    };
+    chatHistory.push(msg);
+    const pending = document.getElementById('chatPending'); // 窗口可能中途收起,没元素就只留 history
+    if (pending) pending.outerHTML = chatMsgHtml(msg);
+  } catch (err) {
+    const msg = { role: 'ai', text: err.message, error: true };
+    chatHistory.push(msg);
+    const pending = document.getElementById('chatPending');
+    if (pending) pending.outerHTML = chatMsgHtml(msg);
+  }
+  scrollChatToEnd(log);
+  updateExportUi();
+}
+
+/* ---------------------- 左下角版本徽标 ---------------------- */
+
+const UPDATE_LABELS = {
+  idle: '', checking: '检查中', downloading: '下载中', verifying: '校验中',
+  extracting: '解压中', installing: '安装中', restarting: '重启中',
+  available: '有新版', uptodate: '已最新', disabled: '未配置', error: '检查失败',
+};
+const BUSY_STATES = ['checking', 'downloading', 'verifying', 'extracting', 'installing', 'restarting'];
+
+let versionPollTimer = null;
+
+async function refreshVersionChip() {
+  const chip = document.getElementById('versionChip');
+  if (!chip) return;
+  let v;
+  try {
+    v = await api('/api/version');
+  } catch {
+    chip.className = 'version-chip err';
+    document.getElementById('versionState').textContent = '服务未响应';
+    return;
+  }
+
+  const st = v.update_state || {};
+  const state = st.state || 'idle';
+  document.getElementById('versionNum').textContent = 'v' + v.version;
+
+  const busy = BUSY_STATES.includes(state);
+  const hasUpdate = state === 'available';
+  chip.className =
+    'version-chip' + (hasUpdate ? ' has-update' : '') + (busy ? ' busy' : '') +
+    (state === 'uptodate' ? ' ok' : '') + (state === 'error' ? ' err' : '');
+
+  let label = UPDATE_LABELS[state] ?? '';
+  if (busy && st.percent) label += ` ${st.percent}%`;
+  if (hasUpdate && st.latest) label = `新版 v${st.latest}`;
+  document.getElementById('versionState').textContent = label;
+  chip.title = state === 'error' && st.error ? st.error
+    : hasUpdate ? `有新版 v${st.latest},点击查看` : '点击检查更新';
+
+  // 齿轮上也挂个小红点,设置藏起来之后仍要能被注意到
+  const dot = document.getElementById('gearDot');
+  if (dot) dot.hidden = !hasUpdate;
+
+  // 更新过程中持续轮询,结束后停掉
+  if (busy && !versionPollTimer) {
+    versionPollTimer = setInterval(refreshVersionChip, 1500);
+  } else if (!busy && versionPollTimer) {
+    clearInterval(versionPollTimer);
+    versionPollTimer = null;
+  }
+}
+
+document.getElementById('versionChip').addEventListener('click', async () => {
+  const chip = document.getElementById('versionChip');
+  if (chip.classList.contains('busy')) return;
+
+  // 有新版就直接打开设置的"版本更新"分区;否则当场检查一次
+  if (chip.classList.contains('has-update')) {
+    openSettings('update');
+    return;
+  }
+  document.getElementById('versionState').textContent = '检查中';
+  try {
+    const r = await api('/api/update/check');
+    await refreshVersionChip();
+    if (r.state === 'disabled') {
+      toast('还没配置更新源,先填仓库地址');
+      openSettings('update');
+    } else if (r.hasUpdate) {
+      toast(`发现新版 v${r.latest}`);
+      openSettings('update');
+    } else if (r.ok) {
+      toast('已是最新版本');
+    } else {
+      toast(r.error || '检查失败', true);
+    }
+  } catch (err) {
+    toast(err.message, true);
+    refreshVersionChip();
+  }
+});
+
 async function refreshAiBadge() {
   try {
     const s = await api('/api/settings');
-    document.getElementById('navAiState').textContent = s.ai_enabled === '1' ? '开' : '关';
+    const txt = s.ai_enabled === '1' ? '开' : '关';
+    const w = document.getElementById('chatAiState');
+    if (w) {
+      w.textContent = txt;
+      w.classList.toggle('off', s.ai_enabled !== '1');
+    }
   } catch { /* 忽略 */ }
 }
 
@@ -1639,18 +2376,12 @@ const UPDATE_STATE_LABEL = {
 
 let updateStateCache = { update_state: { state: 'idle' } };
 
+/** 版本状态统一由左下角徽标(refreshVersionChip)呈现。 */
 async function refreshVersion() {
   try {
     updateStateCache = await api('/api/version');
   } catch { /* 后端未起时忽略 */ }
-  renderUpdateBadge();
-}
-
-function renderUpdateBadge() {
-  const badge = document.getElementById('updateBadge');
-  if (!badge) return;
-  const st = updateStateCache.update_state;
-  badge.hidden = !(st && st.state === 'available');
+  return refreshVersionChip();
 }
 
 function setupUpdatePanel() {
@@ -1690,7 +2421,7 @@ function setupUpdatePanel() {
         body: JSON.stringify({ update_token: null }),
       });
       toast('令牌已清除');
-      renderSettings();
+      paintSettingsSection();
     } catch (err) {
       toast(err.message, true);
     }
@@ -1793,11 +2524,10 @@ function setupUpdatePanel() {
   } catch (err) {
     toast('无法连接后端服务:' + err.message, true);
   }
-  document.getElementById('updateBadge')?.addEventListener('click', () => go('settings'));
   await refreshVersion();
   const st = updateStateCache.update_state;
   if (st && st.state === 'available' && st.latest) {
-    toast(`发现新版本 v${st.latest},可在"设置与备份"里更新`);
+    toast(`发现新版本 v${st.latest},点左下角版本号更新`);
   }
   go('search');
 })();

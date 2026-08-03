@@ -16,6 +16,10 @@
           <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
         </svg>
         <h1>产品档案</h1>
+        <button class="gear-btn" id="gearBtn" title="设置">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span class="gear-dot" id="gearDot" hidden></span>
+        </button>
       </div>
       <p>Product &amp; Price Index</p>
     </div>
@@ -33,11 +37,6 @@
         供应商管理
         <span class="nav-num" id="navSupplierCount">0</span>
       </button>
-      <button class="nav-item" data-view="settings">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        设置与备份
-        <span class="nav-num" id="navAiState">关</span>
-      </button>
       <button class="nav-item" data-view="import">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
         合同导入
@@ -50,6 +49,13 @@
         <svg id="themeIcon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
         <span id="themeLabel">深色模式</span>
       </button>
+
+      <button class="version-chip" id="versionChip" title="点击检查更新">
+        <span class="version-dot" id="versionDot"></span>
+        <span class="version-num" id="versionNum">v—</span>
+        <span class="version-state" id="versionState">检查中</span>
+      </button>
+
       本地运行 · 数据不出本机<br />
       <code>127.0.0.1:3300</code>
     </div>
@@ -75,13 +81,46 @@
           <div class="metric-value warn" id="mLow">—</div>
         </div>
       </div>
-      <button class="update-badge" id="updateBadge" hidden title="在 设置与备份 里更新">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
-        有新版本
-      </button>
     </div>
     <div class="content" id="content"></div>
   </main>
+</div>
+
+<!-- 全局悬浮问一句(所有视图可用) -->
+<button class="chat-fab" id="chatFab" title="问一句" aria-label="打开查询助手" aria-expanded="false">
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.9 8.9 0 0 1-3.8-.8L3 21l1.9-5a8.4 8.4 0 0 1-.8-3.6 8.4 8.4 0 0 1 8.4-8.4 8.4 8.4 0 0 1 8.5 8.4z"/></svg>
+</button>
+
+<div class="chat-widget" id="chatWidget" hidden>
+  <div class="chat-widget-head">
+    <div class="chat-widget-title">问一句 <span class="ai-state" id="chatAiState">—</span></div>
+    <div class="chat-widget-actions">
+      <div class="chat-export-wrap">
+        <button class="icon-btn" id="chatExport" title="导出查询结果" disabled>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>
+        </button>
+        <div class="chat-export-menu" id="chatExportMenu" hidden>
+          <button type="button" data-format="xlsx">导出为 XLSX</button>
+          <button type="button" data-format="csv">导出为 CSV</button>
+        </div>
+      </div>
+      <button class="icon-btn" id="chatClear" title="清空对话">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+      </button>
+      <button class="icon-btn" id="chatClose" title="收起">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="chat-log" id="chatLog"></div>
+
+  <div class="chat-samples" id="chatSamples"></div>
+
+  <div class="chat-input-row">
+    <textarea id="chatInput" rows="1" placeholder="问一句…(回车发送,Shift+回车换行)"></textarea>
+    <button class="btn btn-primary" id="chatSend">发送</button>
+  </div>
 </div>
 
 <script src="app.js"></script>

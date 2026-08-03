@@ -7,6 +7,7 @@ archive/*
 !archive/.gitkeep
 .env*
 versions/
+current.txt
 dist/
 *.zip
 config.json

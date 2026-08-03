@@ -20,6 +20,8 @@ const paths = require('./lib/paths');
 const { IMAGE_DIR } = paths;
 const appConfig = require('./lib/config');
 const agent = require('./lib/agent');
+const fsBrowse = require('./lib/fsBrowse');
+const ExcelJS = require('exceljs'); // parsers 里已在解析合同;这里用来把查询结果导出成表格
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -774,20 +776,85 @@ app.put('/api/settings', (req, res) => {
   res.json(publicSettings());
 });
 
-/** 对话式查询:模型只做意图识别和组织语言,数字全部来自真实查询。 */
+/** 对话式查询:模型只做意图识别和组织语言,数字全部来自真实查询。
+ *  AI 未配置时不再直接拒绝,走 agent 的关键词检索降级路径(_fallback),返回 degraded:true。 */
 app.post('/api/agent/ask', async (req, res) => {
-  const cfg = settings.aiConfig();
-  if (!cfg.baseUrl) {
-    return res.status(400).json({ error: '还没配置 AI —— 到「设置与备份」里选本地或云端接口' });
+  if (!String(req.body?.question || '').trim()) {
+    return res.status(400).json({ error: '问题不能为空' });
   }
   try {
-    res.json(await agent.ask(req.body?.question));
+    res.json(await agent.ask(req.body.question));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+/** 表格导出:前端把查询结果的行/列发来,服务端用 exceljs 生成 xlsx/csv 流式下载。 */
+const EXPORT_MAX_ROWS = 2000;
+
+app.post('/api/export', async (req, res) => {
+  const { format, columns, rows } = req.body || {};
+  if (format !== 'xlsx' && format !== 'csv') {
+    return res.status(400).json({ error: 'format 只支持 xlsx 或 csv' });
+  }
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ error: '没有可导出的数据' });
+  }
+  if (rows.length > EXPORT_MAX_ROWS) {
+    return res.status(400).json({ error: `数据过多,最多导出 ${EXPORT_MAX_ROWS} 行` });
+  }
+  // 列名由前端算好传来;缺失时按前端 chatRowsHtml 同规则兜底
+  const cols = Array.isArray(columns) && columns.length
+    ? columns.map(String)
+    : [...new Set(rows.flatMap((r) => Object.keys(r || {})))];
+  if (!cols.length) return res.status(400).json({ error: '列名为空' });
+
+  try {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('查询结果');
+    ws.columns = cols.map((c) => ({ header: c, key: c, width: 18 }));
+    ws.addRows(rows);
+    ws.getRow(1).font = { bold: true };
+
+    const pad = (n) => String(n).padStart(2, '0');
+    const d = new Date();
+    const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    const filename = `查询结果_${stamp}.${format}`;
+    // RFC 5987:中文文件名走 filename*,再留 ASCII 兜底名
+    const encoded = encodeURIComponent(filename);
+    res.setHeader('Content-Disposition', `attachment; filename="export.${format}"; filename*=UTF-8''${encoded}`);
+
+    if (format === 'csv') {
+      const buf = await wb.csv.writeBuffer();
+      // 前置 UTF-8 BOM,否则中文版 Excel 打开 CSV 会按 ANSI 解出乱码
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.end(Buffer.concat([Buffer.from('﻿', 'utf8'), buf]));
+    } else {
+      const buf = await wb.xlsx.writeBuffer();
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.send(buf);
+    }
+  } catch (err) {
+    res.status(500).json({ error: '导出失败: ' + err.message });
+  }
+});
+
 /* --------------------------- 存储路径设置 --------------------------- */
+
+/* --------------------------- 文件夹选择器 --------------------------- */
+
+/** 列目录(只列子文件夹,不读文件),给界面上的"选择文件夹"用。 */
+app.get('/api/fs/list', (req, res) => {
+  const r = fsBrowse.list(String(req.query.path || ''));
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
+});
+
+app.post('/api/fs/mkdir', (req, res) => {
+  const r = fsBrowse.makeDir(req.body?.parent, req.body?.name);
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
+});
 
 app.get('/api/paths', (req, res) => {
   const cfg = appConfig.read();
