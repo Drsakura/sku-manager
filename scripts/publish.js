@@ -70,7 +70,9 @@ async function main() {
       /^(data|archive|inbox|versions|dist|node_modules)\//.test(n) || /^\.env/.test(n) ||
       /\.(db|xlsx|xls|pdf)$/i.test(n) ||
       // 本机状态文件:发出去会让别人的安装指向不存在的版本/路径
-      /^(current\.txt|config\.json)$/.test(n)
+      /^(current\.txt|config\.json)$/.test(n) ||
+      // 本地开发工具配置
+      /^\.claude\//.test(n)
     );
 
     console.log(`>> 试跑打包: ${path.relative(ROOT, zipPath)}`);
@@ -215,6 +217,8 @@ function createZip(zipPath) {
         //                  指到一个他机器上不存在的位置
         'current.txt',
         'config.json',
+        // 本地开发工具配置(Claude Code 等),与运行无关,不必分发
+        '.claude/**',
         // 单独入包以便设置可执行位(见下)
         ...SHELL_ENTRIES,
       ],
