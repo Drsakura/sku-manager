@@ -146,6 +146,31 @@ tbody td .btn-sm { padding: 4px 10px; font-size: 13px; }
 .chat-msg.ai .chat-bubble { background: var(--panel-2); border: 1px solid var(--line-soft); }
 .chat-msg.err .chat-bubble { background: var(--warn-bg); color: var(--warn-ink); border: 1px solid var(--warn-line); }
 
+/* AI 降级提示:说清为什么没走模型,并给一个能点的修复入口 */
+.chat-degraded {
+  margin-top: 8px;
+  max-width: 88%;
+  padding: 9px 12px;
+  border: 1px solid var(--warn-line);
+  border-radius: 9px;
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.chat-degraded b { display: block; font-size: 13.5px; }
+.chat-degraded-btn {
+  margin-top: 7px;
+  padding: 4px 11px;
+  border: 1px solid var(--warn-line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--warn-ink);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.chat-degraded-btn:hover { background: rgba(0, 0, 0, 0.06); }
+
 /* 依据数据表:答案是方便,这里才是报价依据 */
 .chat-rows { margin-top: 9px; }
 .chat-rows .table-wrap { max-height: 260px; }
@@ -448,6 +473,221 @@ tbody td .btn-sm { padding: 4px 10px; font-size: 13px; }
   display: flex; gap: 9px; flex-wrap: wrap;
   padding-top: 4px;
 }
+
+/* --- 批量选择 --- */
+
+.pick-cell { width: 34px; padding-right: 0 !important; }
+.pick-cell input {
+  accent-color: var(--accent);
+  width: 15px; height: 15px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+tbody tr.picked { background: var(--accent-glow); }
+tbody tr.picked td { border-color: var(--accent-line); }
+
+.batch-bar {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--accent-line);
+  border-radius: 10px;
+  background: var(--accent-glow);
+}
+.batch-bar .grow { flex: 1; }
+.batch-count { font-size: 13.5px; color: var(--fg-dim); }
+.batch-count b { color: var(--accent-ink); font-size: 15px; margin: 0 2px; }
+
+.cart-badge {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 5px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* --- 小推车 --- */
+
+.cart-list { display: flex; flex-direction: column; gap: 8px; }
+
+.cart-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+.cart-row.dragging { opacity: .4; }
+/* 拖到哪一侧就在哪一侧画线 —— 光看行在动,不知道会落在前面还是后面 */
+.cart-row.drop-before { box-shadow: 0 -2px 0 var(--accent); }
+.cart-row.drop-after { box-shadow: 0 2px 0 var(--accent); }
+
+.cart-handle {
+  cursor: grab;
+  color: var(--fg-mute);
+  font-size: 15px;
+  letter-spacing: -3px;
+  user-select: none;
+  padding: 0 2px;
+}
+.cart-handle:active { cursor: grabbing; }
+
+.cart-thumb { flex: none; }
+.cart-main { flex: 1; min-width: 0; }
+.cart-name {
+  font-size: 14px;
+  color: var(--fg);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cart-meta { font-size: 12px; color: var(--fg-mute); margin-top: 2px; }
+.cart-meta code { font-family: var(--font-mono); }
+
+.cart-price {
+  flex: none;
+  min-width: 92px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 14.5px;
+  color: var(--accent-ink);
+  font-variant-numeric: tabular-nums;
+}
+.cart-price .unit { font-size: 11px; color: var(--fg-mute); margin-right: 1px; }
+
+.cart-qty { flex: none; display: flex; flex-direction: column; gap: 3px; width: 78px; }
+.cart-qty span { font-size: 11px; color: var(--fg-mute); }
+.cart-qty input { width: 100%; padding: 5px 7px; font-size: 13px; text-align: right; }
+
+.cart-del {
+  flex: none;
+  width: 26px; height: 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg-mute);
+  font-size: 16px; line-height: 1;
+  cursor: pointer;
+}
+.cart-del:hover { color: var(--warn); border-color: var(--warn-line); background: var(--warn-bg); }
+
+.cart-foot {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 14px 22px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.cart-foot .grow { flex: 1; }
+.cart-total { font-size: 13.5px; color: var(--fg-dim); }
+.cart-total b { font-family: var(--font-mono); font-size: 18px; color: var(--accent-ink); }
+.cart-total .unit { font-size: 12px; color: var(--fg-mute); margin-right: 1px; }
+
+@media (max-width: 860px) {
+  .cart-row { flex-wrap: wrap; }
+  .cart-main { flex-basis: 100%; order: -1; }
+}
+
+/* --- 汇总报价 --- */
+
+.q-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px 12px;
+}
+
+.q-table { font-size: 13px; }
+.q-table code { font-family: var(--font-mono); font-size: 12px; }
+.q-table input {
+  width: 100%;
+  padding: 4px 7px;
+  font-size: 12.5px;
+}
+.q-table .q-price { text-align: right; font-family: var(--font-mono); }
+.q-table td.price { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+@media (max-width: 860px) {
+  .q-grid { grid-template-columns: 1fr; }
+}
+
+/* --- 开关行:整行可点,右边一个滑块 + 状态字 --- */
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+.switch-row:hover { border-color: var(--line-strong, var(--accent)); }
+.switch-row.on { border-color: var(--accent); background: var(--accent-glow); }
+
+.switch-row-text { flex: 1; min-width: 0; }
+.switch-row-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.switch-row-desc {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--fg-mute);
+}
+
+.switch { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.switch-track {
+  position: relative;
+  display: block;
+  width: 46px;
+  height: 26px;
+  border-radius: 13px;
+  background: var(--line);
+  transition: background .18s;
+}
+.switch-knob {
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .25);
+  transition: transform .18s;
+}
+.switch input:checked + .switch-track { background: var(--accent); }
+.switch input:checked + .switch-track .switch-knob { transform: translateX(20px); }
+/* 键盘 Tab 过来时要看得见焦点 —— input 本身是隐藏的,焦点圈画在轨道上 */
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.switch-state {
+  font-size: 13px;
+  color: var(--fg-mute);
+  min-width: 42px; /* 固定宽度,切换时右侧不跳 */
+}
+.switch-row.on .switch-state { color: var(--accent); font-weight: 600; }
+
+/* 折叠起来的高级项:默认不占版面,需要的人自己展开 */
+.settings-advanced { margin-top: 10px; }
+.settings-advanced > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--fg-mute);
+  padding: 4px 0;
+  user-select: none;
+}
+.settings-advanced > summary:hover { color: var(--fg-dim); }
+.settings-advanced[open] > summary { margin-bottom: 10px; }
 
 /* --- 文件夹选择器 --- */
 

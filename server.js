@@ -5,7 +5,8 @@ const fs = require('fs');
 const db = require('./db/db');
 const { processFile, scanFolder, listContractFiles, INBOX_DIR } = require('./ingest');
 const settings = require('./lib/settings');
-const { probe } = require('./lib/aiClient');
+const { probe, chat, parseJsonReply } = require('./lib/aiClient');
+const quote = require('./lib/quote');
 const { normalizeSku, groupKey } = require('./lib/normalize');
 const backup = require('./lib/backup');
 const updater = require('./lib/updater');
@@ -456,6 +457,258 @@ app.delete('/api/product/:sku', (req, res) => {
   })();
   cleanupGroupIfEmpty(existing.group_id);
   res.json({ ok: true });
+});
+
+/**
+ * 批量删除产品(整个 SPU 连同下挂货号)。
+ *
+ * 图片文件跟着一起删,但**删文件放在事务提交之后** —— 事务里删文件的话,
+ * 一旦后面某步报错回滚,库回去了、文件却已经没了,对不上。
+ * 调价历史照旧保留备查。
+ */
+app.post('/api/groups/delete', (req, res) => {
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : [])
+    .map(Number)
+    .filter((n) => Number.isInteger(n) && n > 0);
+  if (!ids.length) return res.status(400).json({ error: '没有选中任何产品' });
+
+  const ph = ids.map(() => '?').join(',');
+  const files = db
+    .prepare(`SELECT filename FROM product_images WHERE group_id IN (${ph})`)
+    .all(...ids)
+    .map((r) => r.filename);
+
+  let groups = 0;
+  let items = 0;
+  db.transaction(() => {
+    const skus = db.prepare(`SELECT sku FROM products WHERE group_id IN (${ph})`).all(...ids);
+    items = skus.length;
+    if (skus.length) {
+      const sph = skus.map(() => '?').join(',');
+      const args = skus.map((r) => r.sku);
+      db.prepare(`DELETE FROM item_attributes WHERE sku IN (${sph})`).run(...args);
+      db.prepare(`DELETE FROM cart_items WHERE sku IN (${sph})`).run(...args);
+      db.prepare(`DELETE FROM products WHERE sku IN (${sph})`).run(...args);
+    }
+    db.prepare(`DELETE FROM item_attributes WHERE group_id IN (${ph})`).run(...ids);
+    db.prepare(`DELETE FROM product_images WHERE group_id IN (${ph})`).run(...ids);
+    groups = db.prepare(`DELETE FROM product_groups WHERE id IN (${ph})`).run(...ids).changes;
+  })();
+
+  for (const f of files) {
+    const p = path.join(IMAGE_DIR, f);
+    if (p.startsWith(IMAGE_DIR) && fs.existsSync(p)) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* 文件删不掉不影响数据一致性,忽略 */
+      }
+    }
+  }
+
+  res.json({ ok: true, groups, items });
+});
+
+/* --------------------------------- 小推车 --------------------------------- */
+
+const CART_COLUMNS = `
+  c.sku, c.qty, c.note, c.sort, c.added_at,
+  p.display_sku, p.spec, p.price, p.currency, p.moq,
+  p.description, p.confidence, p.last_updated,
+  g.id AS group_id, g.name AS product_name, g.brand, g.category,
+  s.name AS supplier_name, s.short_name AS supplier_short,
+  (SELECT filename FROM product_images i WHERE i.group_id = g.id
+    ORDER BY i.is_primary DESC, i.id ASC LIMIT 1) AS image`;
+
+const cartRows = () =>
+  db
+    .prepare(
+      `SELECT ${CART_COLUMNS}
+       FROM cart_items c
+       JOIN products p ON p.sku = c.sku
+       LEFT JOIN product_groups g ON g.id = p.group_id
+       LEFT JOIN suppliers s ON s.id = p.supplier_id
+       ORDER BY c.sort, c.id`
+    )
+    .all();
+
+app.get('/api/cart', (req, res) => res.json(cartRows()));
+
+/**
+ * 加入小推车。可以直接给货号,也可以给产品 id(该产品下所有货号一起进)。
+ * 已在车里的不动 —— 重复点"加入"不该把用户排好的顺序打乱。
+ */
+app.post('/api/cart', (req, res) => {
+  const skus = (Array.isArray(req.body?.skus) ? req.body.skus : []).map((s) =>
+    String(s).toUpperCase()
+  );
+  const groupIds = (Array.isArray(req.body?.group_ids) ? req.body.group_ids : [])
+    .map(Number)
+    .filter((n) => Number.isInteger(n) && n > 0);
+
+  if (groupIds.length) {
+    const ph = groupIds.map(() => '?').join(',');
+    for (const r of db
+      .prepare(`SELECT sku FROM products WHERE group_id IN (${ph}) ORDER BY display_sku`)
+      .all(...groupIds)) {
+      skus.push(r.sku);
+    }
+  }
+  if (!skus.length) return res.status(400).json({ error: '没有可加入的货号' });
+
+  const now = new Date().toISOString();
+  let added = 0;
+  db.transaction(() => {
+    let sort = db.prepare('SELECT COALESCE(MAX(sort), -1) AS m FROM cart_items').get().m;
+    const exists = db.prepare('SELECT 1 FROM cart_items WHERE sku = ?');
+    const real = db.prepare('SELECT 1 FROM products WHERE sku = ?');
+    const ins = db.prepare(
+      'INSERT INTO cart_items (sku, sort, added_at) VALUES (@sku, @sort, @added_at)'
+    );
+    for (const sku of skus) {
+      if (exists.get(sku) || !real.get(sku)) continue;
+      ins.run({ sku, sort: ++sort, added_at: now });
+      added += 1;
+    }
+  })();
+
+  res.json({ ok: true, added, rows: cartRows() });
+});
+
+app.patch('/api/cart/:sku', (req, res) => {
+  const sku = req.params.sku.toUpperCase();
+  if (!db.prepare('SELECT 1 FROM cart_items WHERE sku = ?').get(sku)) {
+    return res.status(404).json({ error: 'not found' });
+  }
+  const b = req.body || {};
+  if ('qty' in b) {
+    // 空/0 表示"没定数量",出报价单时按未填处理,不要落成 0
+    const n = Number(b.qty);
+    db.prepare('UPDATE cart_items SET qty = ? WHERE sku = ?').run(
+      Number.isFinite(n) && n > 0 ? Math.round(n) : null,
+      sku
+    );
+  }
+  if ('note' in b) {
+    db.prepare('UPDATE cart_items SET note = ? WHERE sku = ?').run(
+      String(b.note || '').trim() || null,
+      sku
+    );
+  }
+  res.json({ ok: true, rows: cartRows() });
+});
+
+app.delete('/api/cart/:sku', (req, res) => {
+  db.prepare('DELETE FROM cart_items WHERE sku = ?').run(req.params.sku.toUpperCase());
+  res.json({ ok: true, rows: cartRows() });
+});
+
+app.post('/api/cart/clear', (req, res) => {
+  db.prepare('DELETE FROM cart_items').run();
+  res.json({ ok: true, rows: [] });
+});
+
+/** 拖拽排序落库。只认车里已有的货号,顺序按传入数组重排。 */
+app.put('/api/cart/order', (req, res) => {
+  const skus = (Array.isArray(req.body?.skus) ? req.body.skus : []).map((s) =>
+    String(s).toUpperCase()
+  );
+  db.transaction(() => {
+    const upd = db.prepare('UPDATE cart_items SET sort = ? WHERE sku = ?');
+    skus.forEach((sku, i) => upd.run(i, sku));
+  })();
+  res.json({ ok: true, rows: cartRows() });
+});
+
+/* ------------------------------- 汇总报价 ------------------------------- */
+
+/** 预览:算好每行单价/金额/合计给前端显示。跟导出走同一套计算,所见即所得。 */
+app.post('/api/quote/preview', (req, res) => {
+  const rows = cartRows();
+  if (!rows.length) return res.status(400).json({ error: '小推车是空的' });
+  res.json(quote.buildQuote(rows, req.body || {}));
+});
+
+app.post('/api/quote/export', async (req, res) => {
+  const rows = cartRows();
+  if (!rows.length) return res.status(400).json({ error: '小推车是空的' });
+  try {
+    const q = quote.buildQuote(rows, req.body || {});
+    const wb = quote.renderWorkbook(q);
+    const filename = `${quote.fileBase(q)}.xlsx`;
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="quote.xlsx"; filename*=UTF-8''${encodeURIComponent(filename)}`
+    );
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.send(await wb.xlsx.writeBuffer());
+  } catch (err) {
+    res.status(500).json({ error: '生成失败: ' + err.message });
+  }
+});
+
+/**
+ * AI 起草**文本**字段:PI 用的英文品名、条款措辞。
+ *
+ * 这里刻意只让模型碰文字 —— 单价、金额、合计全在 lib/quote 里算。
+ * 模型返回的任何数字字段都直接丢掉,免得哪天提示词改坏了就把编的数字写进单据。
+ */
+app.post('/api/quote/draft', async (req, res) => {
+  const rows = cartRows();
+  if (!rows.length) return res.status(400).json({ error: '小推车是空的' });
+
+  const avail = agent.aiAvailability();
+  if (!avail.ok) return res.status(400).json({ error: avail.hint, reason: avail.reason });
+
+  const items = rows.map((r) => ({
+    sku: r.sku,
+    name: r.product_name || r.display_sku || r.sku,
+    spec: r.spec || '',
+  }));
+
+  const prompt = `你在帮一家五金工具外贸公司起草形式发票(PI)的**文字**部分。
+
+给你产品清单(JSON),请为每个 sku 写一个简洁准确的英文品名(DESCRIPTION),
+再给一段常见的英文贸易条款建议。
+
+只输出 JSON:{"names_en":{"货号":"英文品名"},"payment_terms":"","trade_terms":"","remarks":""}
+
+严格遵守:
+1. 英文品名只翻译已给的中文品名和规格,不要自行添加材质、认证、产地等原文没有的信息。
+2. **不要输出任何价格、数量、金额、汇率** —— 这些由系统计算,你写了也会被丢弃。
+3. 只输出 JSON,不要解释。`;
+
+  try {
+    const { content } = await chat(
+      [
+        { role: 'system', content: prompt },
+        { role: 'user', content: JSON.stringify(items, null, 1) },
+      ],
+      { json: true }
+    );
+    const parsed = parseJsonReply(content) || {};
+
+    // 只放行认识的文本字段;数字一概不收
+    const allowed = new Set(rows.map((r) => r.sku));
+    const names_en = {};
+    for (const [k, v] of Object.entries(parsed.names_en || {})) {
+      const sku = String(k).toUpperCase();
+      if (allowed.has(sku) && typeof v === 'string') names_en[sku] = v.trim().slice(0, 200);
+    }
+    const text = (v) => (typeof v === 'string' ? v.trim().slice(0, 500) : '');
+
+    res.json({
+      names_en,
+      payment_terms: text(parsed.payment_terms),
+      trade_terms: text(parsed.trade_terms),
+      remarks: text(parsed.remarks),
+    });
+  } catch (err) {
+    res.status(502).json({ error: `模型调用失败:${err.message}` });
+  }
 });
 
 /** 参数名自动补全 —— 输过一次的参数名,下次直接选。 */
@@ -981,14 +1234,14 @@ async function runUpdateInBackground(repo) {
 app.get('/api/version', (req, res) => {
   res.json({
     version: updater.currentVersion,
-    update_repo: settings.get('update_repo'),
+    update_repo: settings.updateRepo(),
     update_state: updateState,
   });
 });
 
 /** 手动检查更新(会访问 GitHub,由"检查更新"按钮触发)。 */
 app.get('/api/update/check', async (req, res) => {
-  const repo = settings.get('update_repo');
+  const repo = settings.updateRepo();
   if (!repo) {
     updateState.state = 'disabled';
     return res.json({ ok: true, state: 'disabled', current: updater.currentVersion });
@@ -1011,7 +1264,7 @@ app.get('/api/update/check', async (req, res) => {
 
 /** 触发更新(后台跑,立即返回;前端轮询 /api/version 看进度)。 */
 app.post('/api/update/apply', (req, res) => {
-  const repo = settings.get('update_repo');
+  const repo = settings.updateRepo();
   if (!repo) return res.status(400).json({ ok: false, error: '未配置 update_repo' });
   if (['checking', 'downloading', 'verifying', 'extracting', 'installing', 'restarting'].includes(updateState.state)) {
     return res.status(409).json({ ok: false, error: '更新正在进行中' });
@@ -1026,7 +1279,7 @@ app.post('/api/update/apply', (req, res) => {
 // 启动后延迟检查一次,把结果放进 updateState(失败也不影响启动)
 setTimeout(async () => {
   try {
-    const repo = settings.get('update_repo');
+    const repo = settings.updateRepo();
     if (!repo) return;
     const info = await updater.checkUpdate(repo, settings.get('update_token'));
     if (info.ok) {

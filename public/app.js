@@ -1,7 +1,17 @@
 'use strict';
 
 const content = document.getElementById('content');
-const state = { view: 'search', suppliers: [], q: '', supplierFilter: '', onlyLow: false };
+const state = {
+  view: 'search',
+  suppliers: [],
+  q: '',
+  supplierFilter: '',
+  onlyLow: false,
+  // 勾选的产品 id。只活在内存里 —— 换关键词重搜后当次选择就失效,
+  // 免得"看不见的选中项"被批量删掉。
+  selected: new Set(),
+  lastRows: [],
+};
 
 /* -------------------------------- 工具函数 -------------------------------- */
 
@@ -9,6 +19,24 @@ const esc = (s) =>
   String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const money = (n) => (n == null ? '—' : Number(n).toFixed(2));
+
+/**
+ * 从 Content-Disposition 里取文件名。服务端把中文名放在 filename*(RFC 5987),
+ * 只读 filename 会拿到 ASCII 兜底名,下载下来就成了 quote.xlsx。
+ */
+function filenameFromDisposition(header) {
+  if (!header) return '';
+  const star = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (star) {
+    try {
+      return decodeURIComponent(star[1]);
+    } catch {
+      /* 编码坏了就退回普通 filename */
+    }
+  }
+  const plain = header.match(/filename="([^"]+)"/i);
+  return plain ? plain[1] : '';
+}
 
 function priceRange(min, max) {
   if (min == null) return '—';
@@ -236,7 +264,16 @@ function renderSearch() {
           .join('')}
       </select>
       <label class="check"><input type="checkbox" id="onlyLow" ${state.onlyLow ? 'checked' : ''} /> 只看待核对</label>
+      <button class="btn" id="openCart">小推车 <span class="cart-badge" id="cartBadge" hidden>0</span></button>
       <button class="btn btn-primary" id="addProduct">+ 新增产品</button>
+    </div>
+    <div class="batch-bar" id="batchBar" hidden>
+      <span class="batch-count">已选 <b id="batchCount">0</b> 个产品</span>
+      <button class="btn btn-sm" id="batchInvert">反选</button>
+      <button class="btn btn-sm" id="batchNone">取消选择</button>
+      <span class="grow"></span>
+      <button class="btn btn-sm btn-primary" id="batchCart">加入小推车</button>
+      <button class="btn btn-sm btn-danger" id="batchDel">删除</button>
     </div>
     <div id="results"></div>`;
 
@@ -258,8 +295,24 @@ function renderSearch() {
     runSearch();
   });
   document.getElementById('addProduct').addEventListener('click', () => openNewProduct());
+  document.getElementById('openCart').addEventListener('click', () => openCart());
+
+  document.getElementById('batchNone').addEventListener('click', () => setAllPicked(false));
+  document.getElementById('batchInvert').addEventListener('click', () => {
+    const next = new Set(state.lastRows.map((r) => r.id).filter((id) => !state.selected.has(id)));
+    state.selected = next;
+    document.querySelectorAll('#results .pick').forEach((cb) => {
+      cb.checked = next.has(Number(cb.dataset.gid));
+      cb.closest('tr').classList.toggle('picked', cb.checked);
+    });
+    syncPickAll();
+    paintBatchBar();
+  });
+  document.getElementById('batchCart').addEventListener('click', batchAddToCart);
+  document.getElementById('batchDel').addEventListener('click', batchDelete);
 
   qEl.focus();
+  refreshCartBadge();
   runSearch();
 }
 
@@ -272,11 +325,17 @@ async function runSearch() {
   if (state.onlyLow) params.set('only_low', '1');
 
   const rows = await api('/api/search?' + params);
+  state.lastRows = rows;
+  // 结果集变了,原来选中的可能已经不在列表里 —— 只保留还看得见的
+  const visible = new Set(rows.map((r) => r.id));
+  for (const id of [...state.selected]) if (!visible.has(id)) state.selected.delete(id);
 
   if (!rows.length) {
+    state.selected.clear();
     box.innerHTML = state.q || state.supplierFilter || state.onlyLow
       ? emptyState(ICON.search, '没有匹配的记录', '换个关键词试试,或者用右上角「+ 新增产品」直接建一个。')
       : emptyState(ICON.box, '产品库还是空的', '到「合同导入」页把进货合同拖进来自动提取,或者用「+ 新增产品」手工建档。');
+    paintBatchBar();
     return;
   }
 
@@ -284,6 +343,7 @@ async function runSearch() {
     <div class="table-wrap">
       <table>
         <thead><tr>
+          <th class="pick-cell"><input type="checkbox" id="pickAll" title="全选/取消全选" /></th>
           <th></th><th>产品</th><th style="text-align:right">货号数</th>
           <th style="text-align:right">采购价</th><th>供应商</th><th>更新时间</th>
         </tr></thead>
@@ -296,6 +356,109 @@ async function runSearch() {
       openGroup(Number(tr.dataset.gid), tr.dataset.hit || null)
     );
   });
+
+  // 勾选框在可点击的行里面,不拦住事件就会顺手把详情抽屉也打开
+  box.querySelectorAll('.pick').forEach((cb) => {
+    cb.addEventListener('click', (e) => e.stopPropagation());
+    cb.addEventListener('change', () => {
+      const id = Number(cb.dataset.gid);
+      if (cb.checked) state.selected.add(id);
+      else state.selected.delete(id);
+      cb.closest('tr').classList.toggle('picked', cb.checked);
+      syncPickAll();
+      paintBatchBar();
+    });
+  });
+
+  const all = document.getElementById('pickAll');
+  all.addEventListener('click', (e) => e.stopPropagation());
+  all.addEventListener('change', () => setAllPicked(all.checked));
+
+  syncPickAll();
+  paintBatchBar();
+}
+
+/* ---------------------------- 批量选择 ---------------------------- */
+
+function setAllPicked(on) {
+  state.selected = on ? new Set(state.lastRows.map((r) => r.id)) : new Set();
+  document.querySelectorAll('#results .pick').forEach((cb) => {
+    cb.checked = on;
+    cb.closest('tr').classList.toggle('picked', on);
+  });
+  syncPickAll();
+  paintBatchBar();
+}
+
+/** 表头那个框要能表达"选了一部分" —— 否则半选和全选看着一样。 */
+function syncPickAll() {
+  const all = document.getElementById('pickAll');
+  if (!all) return;
+  const total = state.lastRows.length;
+  const n = state.selected.size;
+  all.checked = total > 0 && n === total;
+  all.indeterminate = n > 0 && n < total;
+}
+
+function paintBatchBar() {
+  const bar = document.getElementById('batchBar');
+  if (!bar) return;
+  const n = state.selected.size;
+  bar.hidden = n === 0;
+  if (n === 0) return;
+  bar.querySelector('#batchCount').textContent = n;
+}
+
+function selectedIds() {
+  return [...state.selected];
+}
+
+async function batchAddToCart() {
+  const ids = selectedIds();
+  if (!ids.length) return;
+  try {
+    const r = await api('/api/cart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ group_ids: ids }),
+    });
+    cartRowsCache = r.rows;
+    refreshCartBadge();
+    toast(r.added ? `已加入 ${r.added} 个货号` : '选中的货号都已经在小推车里了');
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function batchDelete() {
+  const ids = selectedIds();
+  if (!ids.length) return;
+  const names = state.lastRows
+    .filter((r) => state.selected.has(r.id))
+    .slice(0, 5)
+    .map((r) => r.name);
+  const more = ids.length > names.length ? `\n…等共 ${ids.length} 个产品` : '';
+  if (
+    !confirm(
+      `确定删除以下产品?连同它们下面的所有货号一并删除,不能撤销。\n\n${names.join('\n')}${more}\n\n(调价历史会保留)`
+    )
+  ) {
+    return;
+  }
+  try {
+    const r = await api('/api/groups/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    toast(`已删除 ${r.groups} 个产品 / ${r.items} 个货号`);
+    state.selected.clear();
+    await runSearch();
+    refreshStats();
+    refreshCartBadge();
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 function groupRowHtml(g) {
@@ -309,7 +472,9 @@ function groupRowHtml(g) {
     : '';
   const meta = [g.brand, g.category].filter(Boolean).map(esc).join(' · ');
 
-  return `<tr data-clickable data-gid="${g.id}" data-hit="${esc(g.matched_items?.[0]?.sku || '')}">
+  const picked = state.selected.has(g.id);
+  return `<tr data-clickable data-gid="${g.id}" data-hit="${esc(g.matched_items?.[0]?.sku || '')}" class="${picked ? 'picked' : ''}">
+    <td class="pick-cell"><input type="checkbox" class="pick" data-gid="${g.id}" ${picked ? 'checked' : ''} /></td>
     <td class="thumb-cell">${thumbHtml(g)}</td>
     <td class="name"><div>${esc(g.name)}</div>${meta ? `<div class="dim" style="font-size:11.5px">${meta}</div>` : ''}${hitLine}</td>
     <td class="num">${g.item_count}</td>
@@ -1709,8 +1874,16 @@ function sectionAiHtml(s) {
     </div>
 
     <div class="settings-group">
-      <label class="check">
-        <input type="checkbox" id="aiEnabled" ${on ? 'checked' : ''} /> 启用 AI 兜底解析与对话查询
+      <label class="switch-row" id="aiEnabledRow">
+        <div class="switch-row-text">
+          <div class="switch-row-title">启用 AI</div>
+          <div class="switch-row-desc">开启后:合同规则解析失败时调用模型兜底,查询助手能听懂人话。关闭则只走关键词检索。</div>
+        </div>
+        <span class="switch">
+          <input type="checkbox" id="aiEnabled" ${on ? 'checked' : ''} />
+          <span class="switch-track"><span class="switch-knob"></span></span>
+          <span class="switch-state">${on ? '已开启' : '已关闭'}</span>
+        </span>
       </label>
     </div>
 
@@ -1794,21 +1967,29 @@ function sectionUpdateHtml(s) {
 
     <div class="settings-group">
       <div class="settings-group-title">更新源</div>
-      <label class="field"><span>GitHub 仓库</span>
-        <input type="text" id="updateRepo" value="${esc(s.update_repo)}" placeholder="Drsakura/sku-manager" /></label>
-      <label class="field"><span>访问令牌 ${
-        s.update_token_set ? '<span class="badge badge-ok">已设置</span>' : '(仓库公开则留空)'
-      }</span>
-        <input type="password" id="updateToken" autocomplete="off"
-          placeholder="${s.update_token_set ? '已保存,留空则不改动' : '私有仓库需要,只读权限即可'}" /></label>
-      <div class="spec-text" style="font-size:13px;color:var(--fg-mute);margin:-6px 0 4px">
-        令牌只存本机数据库,不进 git、不随更新包分发,也不会回传到这个页面。
+      <div class="spec-text" style="font-size:13px;color:var(--fg-mute)">
+        官方源 <code style="font-family:var(--font-mono)">${esc(s.update_repo)}</code>,开箱即用,不用填任何东西。
       </div>
+      <details class="settings-advanced">
+        <summary>改用自建源(一般用不到)</summary>
+        <label class="field"><span>GitHub 仓库</span>
+          <input type="text" id="updateRepo" value="${esc(s.update_repo)}" placeholder="Drsakura/sku-manager" /></label>
+        <label class="field"><span>访问令牌 ${
+          s.update_token_set ? '<span class="badge badge-ok">已设置</span>' : '(仓库公开则留空)'
+        }</span>
+          <input type="password" id="updateToken" autocomplete="off"
+            placeholder="${s.update_token_set ? '已保存,留空则不改动' : '私有仓库需要,只读权限即可'}" /></label>
+        <div class="spec-text" style="font-size:13px;color:var(--fg-mute);margin:-6px 0 4px">
+          留空则回落到官方源。令牌只存本机数据库,不进 git、不随更新包分发,也不会回传到这个页面。
+        </div>
+        <div class="settings-actions" style="margin-top:10px">
+          <button class="btn" id="saveUpdate">保存更新源</button>
+        </div>
+      </details>
     </div>
 
     <div class="settings-actions">
-      <button class="btn" id="saveUpdate">保存</button>
-      <button class="btn" id="checkUpdate">检查更新</button>
+      <button class="btn btn-primary" id="checkUpdate">检查更新</button>
       ${s.update_token_set ? '<button class="btn btn-danger" id="clearToken">清除令牌</button>' : ''}
       <button class="btn btn-primary" id="applyUpdate" hidden>下载并更新</button>
     </div>
@@ -1830,7 +2011,8 @@ function aiPayload() {
   const p = {
     ai_enabled: document.getElementById('aiEnabled').checked ? '1' : '0',
     ai_provider: provider,
-    ai_timeout_ms: String(Math.max(10, Number(document.getElementById('aiTimeout').value) || 180) * 1000),
+    // 留空/填 0 时用 300 秒 —— 与 lib/settings.js 的默认值保持一致
+    ai_timeout_ms: String(Math.max(10, Number(document.getElementById('aiTimeout').value) || 300) * 1000),
   };
   if (provider === 'local') {
     p.ai_base_url = document.getElementById('aiUrl').value.trim();
@@ -1845,6 +2027,15 @@ function aiPayload() {
 }
 
 function setupAiPanel() {
+  // 开关旁边的"已开启/已关闭"要跟着动 —— 只挪一个滑块,不看状态字容易搞不清点没点上
+  const aiEnabled = document.getElementById('aiEnabled');
+  const aiState = document.querySelector('#aiEnabledRow .switch-state');
+  aiEnabled.addEventListener('change', () => {
+    aiState.textContent = aiEnabled.checked ? '已开启' : '已关闭';
+    document.getElementById('aiEnabledRow').classList.toggle('on', aiEnabled.checked);
+  });
+  document.getElementById('aiEnabledRow').classList.toggle('on', aiEnabled.checked);
+
   // 切换本地/云端:只显示对应那组配置
   document.querySelectorAll('input[name="aiProvider"]').forEach((radio) => {
     radio.addEventListener('change', () => {
@@ -2069,6 +2260,457 @@ function setupBackupPanel() {
   });
 }
 
+/* ================================= 小推车 ================================= */
+
+let cartRowsCache = null;
+
+async function loadCart() {
+  cartRowsCache = await api('/api/cart');
+  return cartRowsCache;
+}
+
+/** 顶部按钮上的角标。数字是货号数,不是产品数 —— 报价按货号出。 */
+async function refreshCartBadge() {
+  const badge = document.getElementById('cartBadge');
+  if (!badge) return;
+  if (!cartRowsCache) {
+    try {
+      await loadCart();
+    } catch {
+      return;
+    }
+  }
+  const n = cartRowsCache.length;
+  badge.hidden = n === 0;
+  badge.textContent = n;
+}
+
+async function openCart() {
+  const { drawer, close } = makeDrawer({ wide: true });
+  drawer.innerHTML = `<div class="result-row"><div class="spinner"></div><div class="result-name">加载中…</div></div>`;
+  try {
+    await loadCart();
+  } catch (err) {
+    drawer.innerHTML = `<div class="result-row failed"><div class="result-name">${esc(err.message)}</div></div>`;
+    return;
+  }
+  paintCart(drawer, close);
+}
+
+function paintCart(drawer, close) {
+  const rows = cartRowsCache;
+  refreshCartBadge();
+
+  if (!rows.length) {
+    drawer.innerHTML = `
+      <div class="drawer-head">
+        <div>
+          <h3 style="font-family:var(--font-display);font-size:20px">小推车</h3>
+          <div class="sub">先在产品列表勾选,再点「加入小推车」</div>
+        </div>
+        <button class="icon-btn close" data-close title="关闭">${ICON.close}</button>
+      </div>
+      <div class="drawer-body">
+        ${emptyState(ICON.box, '小推车是空的', '勾选产品后加入这里,拖拽排好顺序,就能一次性出报价单。')}
+      </div>`;
+    drawer.querySelector('[data-close]').addEventListener('click', close);
+    return;
+  }
+
+  // 合计只在**每一行都填了数量**时才给 —— 缺一行就不是真合计,给了反而误导
+  const missingQty = rows.filter((r) => !r.qty).length;
+  const noPrice = rows.filter((r) => r.price == null).length;
+  const total = rows.reduce((s, r) => s + (r.price || 0) * (r.qty || 0), 0);
+
+  drawer.innerHTML = `
+    <div class="drawer-head">
+      <div>
+        <h3 style="font-family:var(--font-display);font-size:20px">小推车</h3>
+        <div class="sub">${rows.length} 个货号 · 拖动左侧手柄调整顺序</div>
+      </div>
+      <button class="icon-btn close" data-close title="关闭">${ICON.close}</button>
+    </div>
+
+    <div class="drawer-body">
+      <div class="cart-list" id="cartList">
+        ${rows.map(cartRowHtml).join('')}
+      </div>
+    </div>
+
+    <div class="cart-foot">
+      <div class="cart-total">
+        ${
+          missingQty
+            ? `<span class="dim">还有 ${missingQty} 行没填数量,填齐后显示采购合计</span>`
+            : `采购合计 <b class="price"><span class="unit">¥</span>${money(total)}</b>`
+        }
+        ${noPrice ? `<div class="dim" style="font-size:12.5px">${noPrice} 个货号库里没有采购价</div>` : ''}
+      </div>
+      <span class="grow"></span>
+      <button class="btn btn-sm btn-danger" id="cartClear">清空</button>
+      <button class="btn btn-primary" id="cartQuote">汇总报价 →</button>
+    </div>`;
+
+  drawer.querySelector('[data-close]').addEventListener('click', close);
+  setupCartList(drawer, close);
+
+  drawer.querySelector('#cartClear').addEventListener('click', async () => {
+    if (!confirm(`清空小推车里的 ${rows.length} 个货号?\n\n只是清空清单,产品本身不受影响。`)) return;
+    cartRowsCache = (await api('/api/cart/clear', { method: 'POST' })).rows;
+    paintCart(drawer, close);
+  });
+
+  drawer.querySelector('#cartQuote').addEventListener('click', () => openQuote(close));
+}
+
+function cartRowHtml(r) {
+  const name = r.product_name || r.display_sku || r.sku;
+  const meta = [r.spec, r.supplier_short || r.supplier_name].filter(Boolean).map(esc).join(' · ');
+  const thumb = r.image
+    ? `<img class="thumb" src="/product-images/${encodeURIComponent(r.image)}" alt="" loading="lazy" />`
+    : `<div class="thumb-empty">${ICON.image}</div>`;
+
+  return `<div class="cart-row" draggable="true" data-sku="${esc(r.sku)}">
+    <div class="cart-handle" title="拖动排序">⋮⋮</div>
+    <div class="cart-thumb">${thumb}</div>
+    <div class="cart-main">
+      <div class="cart-name">${esc(name)}</div>
+      <div class="cart-meta"><code>${esc(r.display_sku || r.sku)}</code>${meta ? ' · ' + meta : ''}</div>
+    </div>
+    <div class="cart-price">${
+      r.price == null
+        ? '<span class="dim">无采购价</span>'
+        : `<span class="unit">¥</span>${money(r.price)}`
+    }${r.moq ? `<div class="dim" style="font-size:12px">MOQ ${r.moq}</div>` : ''}</div>
+    <label class="cart-qty"><span>数量</span>
+      <input type="number" min="1" step="1" value="${r.qty ?? ''}" data-qty placeholder="${r.moq || ''}" /></label>
+    <button class="cart-del" data-del title="移出小推车">×</button>
+  </div>`;
+}
+
+/** 拖拽排序 + 行内改数量/删除。顺序落库,换设备也在。 */
+function setupCartList(drawer, close) {
+  const list = drawer.querySelector('#cartList');
+  let dragged = null;
+
+  list.querySelectorAll('.cart-row').forEach((row) => {
+    row.addEventListener('dragstart', (e) => {
+      dragged = row;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      // Firefox 不设 data 就不触发 drag
+      e.dataTransfer.setData('text/plain', row.dataset.sku);
+    });
+    row.addEventListener('dragend', async () => {
+      row.classList.remove('dragging');
+      list.querySelectorAll('.cart-row').forEach((r) => r.classList.remove('drop-before', 'drop-after'));
+      dragged = null;
+      const skus = [...list.querySelectorAll('.cart-row')].map((r) => r.dataset.sku);
+      try {
+        cartRowsCache = (
+          await api('/api/cart/order', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ skus }),
+          })
+        ).rows;
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    row.addEventListener('dragover', (e) => {
+      if (!dragged || dragged === row) return;
+      e.preventDefault();
+      // 落点取行的上半/下半,拖到哪一半就插到那一侧
+      const before = e.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2;
+      row.classList.toggle('drop-before', before);
+      row.classList.toggle('drop-after', !before);
+      list.insertBefore(dragged, before ? row : row.nextSibling);
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drop-before', 'drop-after'));
+  });
+
+  list.querySelectorAll('[data-qty]').forEach((input) => {
+    input.addEventListener('change', async () => {
+      const sku = input.closest('.cart-row').dataset.sku;
+      try {
+        cartRowsCache = (
+          await api(`/api/cart/${encodeURIComponent(sku)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ qty: input.value }),
+          })
+        ).rows;
+        paintCart(drawer, close); // 合计要跟着变
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+  });
+
+  list.querySelectorAll('[data-del]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const sku = btn.closest('.cart-row').dataset.sku;
+      try {
+        cartRowsCache = (
+          await api(`/api/cart/${encodeURIComponent(sku)}`, { method: 'DELETE' })
+        ).rows;
+        paintCart(drawer, close);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+  });
+}
+
+/* ================================ 汇总报价 ================================ */
+
+// 表单值留在内存里 —— 一次报价常要来回改加价率看合计,每次重开都清空太折磨
+let quoteForm = {
+  doc_type: 'quote',
+  currency: 'CNY',
+  fx_rate: '7.2',
+  markup_pct: '15',
+  customer: '',
+  doc_no: '',
+  validity: '30 天',
+  lead_time: '',
+  payment_terms: '',
+  trade_terms: '',
+  remarks: '',
+};
+let quotePrices = {}; // sku -> 手填售价,优先于加价率
+let quoteNamesEn = {}; // sku -> AI 起草的英文品名(仅 PI 用)
+
+function openQuote(closeCart) {
+  if (closeCart) closeCart();
+  const { drawer, close } = makeDrawer({ wide: true });
+  paintQuote(drawer, close);
+}
+
+async function paintQuote(drawer, close, keepScroll = false) {
+  const scroll = keepScroll ? drawer.querySelector('.drawer-body')?.scrollTop : 0;
+  const pi = quoteForm.doc_type === 'pi';
+
+  let q;
+  try {
+    q = await api('/api/quote/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...quoteForm, prices: quotePrices, names_en: quoteNamesEn }),
+    });
+  } catch (err) {
+    drawer.innerHTML = `<div class="result-row failed"><div class="result-name">${esc(err.message)}</div></div>`;
+    return;
+  }
+
+  const cur = q.symbol;
+  const warn = [];
+  if (q.unpriced) warn.push(`${q.unpriced} 行没有单价(库里没采购价,又没手填售价)`);
+  if (q.missing_qty) warn.push(`${q.missing_qty} 行没填数量,金额按 0 计`);
+  if (q.below_moq.length) warn.push(`低于起订量:${q.below_moq.join('、')}`);
+
+  drawer.innerHTML = `
+    <div class="drawer-head">
+      <div>
+        <h3 style="font-family:var(--font-display);font-size:20px">汇总报价</h3>
+        <div class="sub">${q.lines.length} 个货号 · 单价与合计全部由程序计算</div>
+      </div>
+      <button class="icon-btn close" data-close title="关闭">${ICON.close}</button>
+    </div>
+
+    <div class="drawer-body">
+      <div class="radio-cards" style="margin-bottom:16px">
+        <label class="radio-card ${pi ? '' : 'active'}" data-doc="quote">
+          <div class="radio-card-title"><input type="radio" name="docType" value="quote" ${pi ? '' : 'checked'} /> 报价单</div>
+          <div class="radio-card-desc">中文、人民币,给国内客户。</div>
+        </label>
+        <label class="radio-card ${pi ? 'active' : ''}" data-doc="pi">
+          <div class="radio-card-title"><input type="radio" name="docType" value="pi" ${pi ? 'checked' : ''} /> PI 形式发票</div>
+          <div class="radio-card-desc">英文、外币,给国外客户。</div>
+        </label>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">计价</div>
+        <div class="q-grid">
+          <label class="field"><span>加价率(%)</span>
+            <input type="number" step="0.1" data-qf="markup_pct" value="${esc(quoteForm.markup_pct)}" /></label>
+          <label class="field"><span>币种</span>
+            <select data-qf="currency">
+              ${['CNY', 'USD', 'EUR']
+                .map((c) => `<option value="${c}" ${quoteForm.currency === c ? 'selected' : ''}>${c}</option>`)
+                .join('')}
+            </select></label>
+          <label class="field" ${quoteForm.currency === 'CNY' ? 'hidden' : ''}><span>汇率(1 ${esc(quoteForm.currency)} = ? 元)</span>
+            <input type="number" step="0.0001" data-qf="fx_rate" value="${esc(quoteForm.fx_rate)}" /></label>
+        </div>
+        <div class="spec-text" style="font-size:12.5px;color:var(--fg-mute);margin-top:8px">
+          售价 = 采购价 ×(1 + 加价率)${quoteForm.currency === 'CNY' ? '' : ' ÷ 汇率'};下表里手填的售价优先,不再套加价率。
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">抬头与条款</div>
+        <div class="q-grid">
+          <label class="field"><span>${pi ? 'MESSRS(客户)' : '客户'}</span>
+            <input type="text" data-qf="customer" value="${esc(quoteForm.customer)}" /></label>
+          <label class="field"><span>${pi ? 'INVOICE NO.' : '报价单号'}</span>
+            <input type="text" data-qf="doc_no" value="${esc(quoteForm.doc_no)}" /></label>
+          <label class="field"><span>${pi ? 'VALIDITY' : '报价有效期'}</span>
+            <input type="text" data-qf="validity" value="${esc(quoteForm.validity)}" /></label>
+          <label class="field"><span>${pi ? 'DELIVERY TIME' : '交货期'}</span>
+            <input type="text" data-qf="lead_time" value="${esc(quoteForm.lead_time)}" /></label>
+          <label class="field"><span>${pi ? 'PAYMENT' : '付款方式'}</span>
+            <input type="text" data-qf="payment_terms" value="${esc(quoteForm.payment_terms)}" /></label>
+          <label class="field"><span>${pi ? 'TRADE TERMS' : '贸易条款'}</span>
+            <input type="text" data-qf="trade_terms" value="${esc(quoteForm.trade_terms)}" placeholder="FOB Ningbo / CIF ..." /></label>
+        </div>
+        <label class="field" style="margin-top:10px"><span>${pi ? 'REMARKS' : '备注'}</span>
+          <textarea data-qf="remarks" rows="2">${esc(quoteForm.remarks)}</textarea></label>
+        ${pi ? `<div class="settings-actions" style="margin-top:10px">
+          <button class="btn btn-sm" id="quoteDraft">AI 起草英文品名与条款</button>
+          <span class="dim" style="font-size:12px;align-self:center">只写文字,价格与合计始终由程序计算</span>
+        </div>` : ''}
+        <div id="quoteDraftMsg"></div>
+      </div>
+
+      ${warn.length ? `<div class="result-row warn"><div class="result-name">出单前请确认</div>
+        <div class="result-stat">${warn.map(esc).join(' · ')}</div></div>` : ''}
+
+      <div class="panel">
+        <div class="panel-title">明细(单价可逐行覆盖)</div>
+        <div class="table-wrap">
+          <table class="q-table">
+            <thead><tr>
+              <th>货号</th><th>${pi ? '英文品名' : '品名'}</th>
+              <th style="text-align:right">采购价</th>
+              <th style="text-align:right">数量</th>
+              <th style="text-align:right">售价 ${esc(cur)}</th>
+              <th style="text-align:right">金额 ${esc(cur)}</th>
+            </tr></thead>
+            <tbody>${q.lines.map((l) => quoteLineHtml(l, pi)).join('')}</tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="cart-foot">
+      <div class="cart-total">合计 ${esc(q.currency)}
+        <b><span class="unit">${esc(cur)}</span>${money(q.total)}</b>
+        <div class="dim" style="font-size:12px">共 ${q.total_qty} 件 · 逐行取两位小数后相加</div>
+      </div>
+      <span class="grow"></span>
+      <button class="btn btn-primary" id="quoteExport">导出 Excel</button>
+    </div>`;
+
+  drawer.querySelector('[data-close]').addEventListener('click', close);
+  setupQuoteForm(drawer, close);
+  if (scroll) drawer.querySelector('.drawer-body').scrollTop = scroll;
+}
+
+function quoteLineHtml(l, pi) {
+  const nameCell = pi
+    ? `<input type="text" class="q-name" data-name-sku="${esc(l.sku)}" value="${esc(l.name_en)}" placeholder="${esc(l.name)}" />`
+    : esc(l.name);
+  return `<tr>
+    <td><code>${esc(l.sku)}</code>${l.below_moq ? ' <span class="badge badge-warn">低于MOQ</span>' : ''}</td>
+    <td>${nameCell}${l.spec ? `<div class="dim" style="font-size:11.5px">${esc(l.spec)}</div>` : ''}</td>
+    <td class="num dim">${l.cost == null ? '—' : money(l.cost)}</td>
+    <td class="num">${l.qty || '<span class="dim">—</span>'}</td>
+    <td class="num"><input type="number" step="0.01" class="q-price" data-price-sku="${esc(l.sku)}"
+      value="${quotePrices[l.sku] ?? ''}" placeholder="${l.unit_price == null ? '' : money(l.unit_price)}" /></td>
+    <td class="num price">${l.amount == null ? '<span class="dim">—</span>' : money(l.amount)}</td>
+  </tr>`;
+}
+
+function setupQuoteForm(drawer, close) {
+  const repaint = () => paintQuote(drawer, close, true);
+
+  drawer.querySelectorAll('input[name="docType"]').forEach((radio) => {
+    radio.addEventListener('change', () => {
+      quoteForm.doc_type = radio.value;
+      // PI 默认走美元,报价单默认人民币 —— 但用户改过就不再自作主张
+      if (radio.value === 'pi' && quoteForm.currency === 'CNY') quoteForm.currency = 'USD';
+      repaint();
+    });
+  });
+
+  drawer.querySelectorAll('[data-qf]').forEach((el) => {
+    const key = el.dataset.qf;
+    // 币种/加价率/汇率影响所有金额,改完立刻重算;文字字段等失焦再说
+    const evt = el.tagName === 'SELECT' ? 'change' : 'change';
+    el.addEventListener(evt, () => {
+      quoteForm[key] = el.value;
+      if (['currency', 'markup_pct', 'fx_rate'].includes(key)) repaint();
+    });
+  });
+
+  drawer.querySelectorAll('.q-price').forEach((input) => {
+    input.addEventListener('change', () => {
+      const sku = input.dataset.priceSku;
+      const v = input.value.trim();
+      if (v === '') delete quotePrices[sku];
+      else quotePrices[sku] = v;
+      repaint();
+    });
+  });
+
+  drawer.querySelectorAll('.q-name').forEach((input) => {
+    input.addEventListener('change', () => {
+      quoteNamesEn[input.dataset.nameSku] = input.value;
+    });
+  });
+
+  drawer.querySelector('#quoteDraft')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const msg = drawer.querySelector('#quoteDraftMsg');
+    btn.disabled = true;
+    msg.innerHTML =
+      '<div class="result-row"><div class="spinner"></div><div class="result-name">模型正在起草…</div></div>';
+    try {
+      const r = await api('/api/quote/draft', { method: 'POST' });
+      Object.assign(quoteNamesEn, r.names_en);
+      // 只填空着的条款,不覆盖用户已经写好的
+      for (const k of ['payment_terms', 'trade_terms', 'remarks']) {
+        if (r[k] && !quoteForm[k]) quoteForm[k] = r[k];
+      }
+      toast(`已填入 ${Object.keys(r.names_en).length} 条英文品名`);
+      repaint();
+    } catch (err) {
+      msg.innerHTML = `<div class="result-row failed"><div class="result-name">${esc(err.message)}</div></div>`;
+      btn.disabled = false;
+    }
+  });
+
+  drawer.querySelector('#quoteExport').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/quote/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...quoteForm, prices: quotePrices, names_en: quoteNamesEn }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '导出失败');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filenameFromDisposition(res.headers.get('Content-Disposition')) || 'quote.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast('已开始下载');
+    } catch (err) {
+      toast(err.message, true);
+    }
+    btn.disabled = false;
+  });
+}
+
 /* ================================ 对话助手 ================================ */
 
 const CHAT_SAMPLES = [
@@ -2148,6 +2790,11 @@ chatSamples.addEventListener('click', (e) => {
   if (chip) sendChat(chip.textContent, { log: chatLog, input: chatInput });
 });
 
+// 降级提示里的「去设置 AI」:直接跳到对应分区,省得自己找
+chatLog.addEventListener('click', (e) => {
+  if (e.target.closest('[data-open-ai]')) openSettings('ai');
+});
+
 // 导出:小菜单选格式 → POST /api/export → blob 触发下载
 chatExport.addEventListener('click', (e) => {
   e.stopPropagation();
@@ -2200,7 +2847,22 @@ function chatMsgHtml(m) {
   }
   const cls = m.error ? 'err' : 'ai';
   const rows = m.rows && m.rows.length ? chatRowsHtml(m.rows) : '';
-  return `<div class="chat-msg ${cls}"><div class="chat-bubble">${esc(m.text)}</div>${rows}</div>`;
+  const warn = m.degraded ? chatDegradedHtml(m.degraded) : '';
+  return `<div class="chat-msg ${cls}"><div class="chat-bubble">${esc(m.text)}</div>${warn}${rows}</div>`;
+}
+
+/**
+ * 降级提示。原来只默默退回关键词检索,用户看到的是"AI 没反应",
+ * 分不清是没配置还是程序坏了 —— 这里直接说清原因,并给一个直达设置的入口。
+ */
+function chatDegradedHtml(d) {
+  // 'nointent' 是模型正常应答但没识别出意图,跟配置无关,不必往设置里引
+  const actionable = d.reason && d.reason !== 'nointent';
+  return `<div class="chat-degraded">
+    <b>AI 未生效,以上为关键词检索结果</b>
+    <div>${esc(d.hint || '模型不可用')}</div>
+    ${actionable ? '<button type="button" class="chat-degraded-btn" data-open-ai>去设置 AI →</button>' : ''}
+  </div>`;
 }
 
 /** 把查询结果渲染成表格 —— 这才是报价依据。 */
@@ -2255,8 +2917,10 @@ async function sendChat(text, opts = {}) {
     });
     const msg = {
       role: 'ai',
-      text: r.answer + (r.degraded ? '\n\n(模型不可用,以上为关键词搜索结果)' : ''),
+      text: r.answer,
       rows: r.rows,
+      // 降级时把具体原因和一个能点的入口给出来,别让用户以为程序坏了
+      degraded: r.degraded ? { reason: r.aiReason, hint: r.aiHint } : null,
     };
     chatHistory.push(msg);
     const pending = document.getElementById('chatPending'); // 窗口可能中途收起,没元素就只留 history

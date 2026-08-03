@@ -8,6 +8,7 @@ archive/*
 .env*
 versions/
 current.txt
+.claude/
 dist/
 *.zip
 config.json

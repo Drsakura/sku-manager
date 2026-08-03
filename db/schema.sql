@@ -93,6 +93,18 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT
 );
 
+-- 小推车:报价前先把要报的货号攒起来,排好顺序,再一次性出报价单。
+-- 存库不存浏览器,换个标签页/重启应用都还在。
+-- sku 唯一 —— 同一个货号加两次只是把它顶到已有位置,不产生重复行。
+CREATE TABLE IF NOT EXISTS cart_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sku TEXT NOT NULL UNIQUE,
+  qty INTEGER,
+  note TEXT,
+  sort INTEGER DEFAULT 0,
+  added_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS product_images (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sku TEXT NOT NULL,
@@ -111,6 +123,7 @@ CREATE INDEX IF NOT EXISTS idx_history_sku ON price_history(sku);
 CREATE INDEX IF NOT EXISTS idx_contracts_supplier ON contracts(supplier_id);
 CREATE INDEX IF NOT EXISTS idx_attr_sku ON item_attributes(sku);
 CREATE INDEX IF NOT EXISTS idx_groups_key ON product_groups(group_key);
+CREATE INDEX IF NOT EXISTS idx_cart_sort ON cart_items(sort);
 
 -- 引用"后加列"(group_id)的索引不能写在这里:老库跑到这一步时
 -- ensureColumn 还没补上该列,会直接报 no such column。
