@@ -1938,8 +1938,16 @@ function sectionAiHtml(s) {
 
     <div class="settings-group">
       <div class="settings-group-title">高级</div>
-      <label class="field" style="max-width:200px"><span>超时(秒)</span>
-        <input type="number" id="aiTimeout" min="10" value="${Math.round(Number(s.ai_timeout_ms) / 1000)}" /></label>
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        <label class="field" style="max-width:200px"><span>超时(秒)</span>
+          <input type="number" id="aiTimeout" min="10" value="${Math.round(Number(s.ai_timeout_ms) / 1000)}" /></label>
+        <label class="field" style="max-width:220px"><span>本地模型上下文(token)</span>
+          <input type="number" id="aiNumCtx" min="2048" step="2048" value="${Number(s.ai_num_ctx) || 16384}" /></label>
+      </div>
+      <div class="spec-text" style="font-size:13px;color:var(--fg-mute);margin-top:6px">
+        上下文只对本地 Ollama 有效。Ollama 不给这个值默认只有 2048,助手多查几步就会被截断、
+        表现成"聊到一半忘了前面查过什么"。内存吃紧可以调到 8192。
+      </div>
     </div>
 
     <div class="settings-actions">
@@ -2013,6 +2021,7 @@ function aiPayload() {
     ai_provider: provider,
     // 留空/填 0 时用 300 秒 —— 与 lib/settings.js 的默认值保持一致
     ai_timeout_ms: String(Math.max(10, Number(document.getElementById('aiTimeout').value) || 300) * 1000),
+    ai_num_ctx: String(Math.max(2048, Number(document.getElementById('aiNumCtx').value) || 16384)),
   };
   if (provider === 'local') {
     p.ai_base_url = document.getElementById('aiUrl').value.trim();
@@ -2714,14 +2723,41 @@ function setupQuoteForm(drawer, close) {
 /* ================================ 对话助手 ================================ */
 
 const CHAT_SAMPLES = [
+  '帮我整理一下供应商',
   '电缆钳剪多少钱',
-  '哪些套装里带测电笔',
+  '库里现在什么情况',
   '最近哪些产品调过价',
-  '华新供货哪些产品',
-  '最便宜的螺丝刀是哪个',
+  '哪家供应商重复了',
+  '你刚才改了什么',
 ];
 
+// 界面上显示的消息(带表格、步骤、操作卡片)
 let chatHistory = [];
+// 助手自己的上下文(含工具调用和结果),原样存、原样回传 ——
+// 追问"那最便宜的那家是谁"要靠上一轮查到的数据,只回传文字答案模型就会开始编。
+let chatContext = [];
+
+// 工具名 → 界面上说的人话
+const TOOL_LABELS = {
+  database_overview: '看库存概览',
+  search_products: '搜产品',
+  product_detail: '查货号详情',
+  price_history: '查调价历史',
+  compare_prices: '跨供应商比价',
+  recent_changes: '查最近调价',
+  list_suppliers: '列供应商',
+  supplier_detail: '查供应商详情',
+  audit_suppliers: '供应商体检',
+  scan_contract_suppliers: '扫描合同认供应商',
+  list_operations: '翻操作流水',
+  apply_supplier_extraction: '从合同建供应商档案',
+  update_supplier: '改供应商资料',
+  merge_suppliers: '合并供应商',
+  rename_supplier: '供应商改名',
+  delete_supplier: '删供应商',
+  undo_operation: '回退操作',
+};
+const toolLabel = (t) => TOOL_LABELS[t] || t;
 
 /* ------------------------- 悬浮问一句(全局,右下角) ------------------------- */
 
@@ -2776,8 +2812,36 @@ document.getElementById('chatClose').addEventListener('click', closeChat);
 document.getElementById('chatSend').addEventListener('click', () => sendChat(chatInput.value, { log: chatLog, input: chatInput }));
 document.getElementById('chatClear').addEventListener('click', () => {
   chatHistory = [];
+  chatContext = []; // 上下文也要一起清,否则新话题里还带着上一单的数据
   chatLog.innerHTML = '';
   updateExportUi();
+});
+
+// 操作卡片上的"撤销":每笔写操作都带流水号,回退走服务端的逆操作
+chatLog.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-undo]');
+  if (!btn || btn.disabled) return;
+  const id = Number(btn.dataset.undo);
+  btn.disabled = true;
+  btn.textContent = '撤销中…';
+  try {
+    const r = await api('/api/agent/undo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    for (const m of chatHistory) {
+      for (const op of m.operations || []) if (op.id === id) op.undone = true;
+    }
+    chatLog.innerHTML = chatHistory.map(chatMsgHtml).join('');
+    scrollChatToEnd(chatLog);
+    toast(r.summary || '已回退');
+    await Promise.all([refreshStats(), loadSuppliers()]); // 库变了,列表得跟上
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = '撤销';
+    toast(err.message, true);
+  }
 });
 chatInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -2848,7 +2912,39 @@ function chatMsgHtml(m) {
   const cls = m.error ? 'err' : 'ai';
   const rows = m.rows && m.rows.length ? chatRowsHtml(m.rows) : '';
   const warn = m.degraded ? chatDegradedHtml(m.degraded) : '';
-  return `<div class="chat-msg ${cls}"><div class="chat-bubble">${esc(m.text)}</div>${warn}${rows}</div>`;
+  return `<div class="chat-msg ${cls}">${chatStepsHtml(m.steps)}<div class="chat-bubble">${esc(
+    m.text
+  )}</div>${warn}${chatOpsHtml(m.operations)}${rows}</div>`;
+}
+
+/** 助手这一轮干了哪几步 —— 让人看得见它是查过才答的,不是张嘴就来。 */
+function chatStepsHtml(steps) {
+  if (!steps || !steps.length) return '';
+  const parts = steps.map((s) => {
+    const label = esc(toolLabel(s.tool));
+    if (s.error) return `<span class="chat-step bad">${label} 失败</span>`;
+    const n = s.rowCount ? ` ${s.rowCount}条` : '';
+    return `<span class="chat-step${s.write ? ' write' : ''}">${label}${n}</span>`;
+  });
+  return `<div class="chat-steps">${parts.join('<span class="chat-step-sep">›</span>')}</div>`;
+}
+
+/** 改过库的每一笔都单独列出来,后面挂个撤销按钮。 */
+function chatOpsHtml(ops) {
+  if (!ops || !ops.length) return '';
+  return `<div class="chat-ops">${ops
+    .map(
+      (o) => `<div class="chat-op${o.undone ? ' undone' : ''}">
+        <span class="chat-op-tag">改动</span>
+        <span class="chat-op-text">${esc(o.summary || toolLabel(o.tool))}</span>
+        ${
+          o.undone
+            ? '<span class="chat-op-done">已撤销</span>'
+            : `<button class="chat-op-undo" data-undo="${o.id}" title="把这笔改动原样退回去">撤销</button>`
+        }
+      </div>`
+    )
+    .join('')}</div>`;
 }
 
 /**
@@ -2904,7 +3000,7 @@ async function sendChat(text, opts = {}) {
   log.insertAdjacentHTML('beforeend', chatMsgHtml({ role: 'me', text: q }));
   log.insertAdjacentHTML(
     'beforeend',
-    '<div class="chat-msg ai" id="chatPending"><div class="chat-bubble"><span class="spinner" style="display:inline-block;vertical-align:-2px"></span> 正在查…</div></div>'
+    '<div class="chat-msg ai" id="chatPending"><div class="chat-bubble"><span class="spinner" style="display:inline-block;vertical-align:-2px"></span> 正在查…(要办的事多的话会分几步,稍等)</div></div>'
   );
   input.value = '';
   scrollChatToEnd(log);
@@ -2913,18 +3009,23 @@ async function sendChat(text, opts = {}) {
     const r = await api('/api/agent/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q }),
+      body: JSON.stringify({ question: q, messages: chatContext }),
     });
+    if (Array.isArray(r.messages)) chatContext = r.messages;
     const msg = {
       role: 'ai',
       text: r.answer,
       rows: r.rows,
+      steps: r.steps || [],
+      operations: r.operations || [],
       // 降级时把具体原因和一个能点的入口给出来,别让用户以为程序坏了
       degraded: r.degraded ? { reason: r.aiReason, hint: r.aiHint } : null,
     };
     chatHistory.push(msg);
     const pending = document.getElementById('chatPending'); // 窗口可能中途收起,没元素就只留 history
     if (pending) pending.outerHTML = chatMsgHtml(msg);
+    // 写过库就把列表刷一遍,不然界面还停在旧数据上
+    if (msg.operations.length) await Promise.all([refreshStats(), loadSuppliers()]);
   } catch (err) {
     const msg = { role: 'ai', text: err.message, error: true };
     chatHistory.push(msg);

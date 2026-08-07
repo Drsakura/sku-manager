@@ -12,3 +12,7 @@ current.txt
 dist/
 *.zip
 config.json
+
+# macOS 垃圾:拷到 exFAT/NTFS 盘时产生的资源叉和目录元数据
+.DS_Store
+._*

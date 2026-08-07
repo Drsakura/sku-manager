@@ -115,6 +115,22 @@ CREATE TABLE IF NOT EXISTS product_images (
   created_at TEXT NOT NULL
 );
 
+-- 助手的写操作流水。每条都带 undo(逆操作 JSON),所以任何改动都能原样退回去。
+-- 逆操作格式见 lib/agentLog.js —— 只认 restore/delete/set 三种步骤,表名走白名单。
+CREATE TABLE IF NOT EXISTS agent_operations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  args TEXT,          -- 调用参数 JSON,方便复盘"它当时想干什么"
+  summary TEXT,       -- 人话摘要,列表里直接显示这个
+  affected INTEGER DEFAULT 0,
+  undo TEXT,          -- 逆操作 JSON;为空 = 不可回退(回退操作本身就是)
+  undone_at TEXT,     -- 非空 = 已被回退
+  undone_by INTEGER   -- 执行回退的那条操作 id
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_ops_at ON agent_operations(at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_images_sku ON product_images(sku);
 CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);

@@ -21,6 +21,7 @@ const paths = require('./lib/paths');
 const { IMAGE_DIR } = paths;
 const appConfig = require('./lib/config');
 const agent = require('./lib/agent');
+const agentLog = require('./lib/agentLog');
 const fsBrowse = require('./lib/fsBrowse');
 const ExcelJS = require('exceljs'); // parsers 里已在解析合同;这里用来把查询结果导出成表格
 
@@ -1010,7 +1011,7 @@ app.get('/api/settings', (req, res) => {
 });
 
 const PLAIN_SETTING_KEYS = [
-  'ai_enabled', 'ai_provider', 'ai_base_url', 'ai_model', 'ai_timeout_ms',
+  'ai_enabled', 'ai_provider', 'ai_base_url', 'ai_model', 'ai_timeout_ms', 'ai_num_ctx',
   'ai_cloud_preset', 'ai_cloud_base_url', 'ai_cloud_model',
   'update_repo', 'update_auto_check',
 ];
@@ -1032,13 +1033,28 @@ app.put('/api/settings', (req, res) => {
 /** 对话式查询:模型只做意图识别和组织语言,数字全部来自真实查询。
  *  AI 未配置时不再直接拒绝,走 agent 的关键词检索降级路径(_fallback),返回 degraded:true。 */
 app.post('/api/agent/ask', async (req, res) => {
-  if (!String(req.body?.question || '').trim()) {
-    return res.status(400).json({ error: '问题不能为空' });
-  }
+  const question = String(req.body?.question || '').trim();
+  if (!question) return res.status(400).json({ error: '问题不能为空' });
   try {
-    res.json(await agent.ask(req.body.question));
+    res.json(await agent.ask({ question, messages: req.body?.messages }));
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+/** 助手写操作的流水账。 */
+app.get('/api/agent/operations', (req, res) => {
+  res.json({ operations: agentLog.list({ limit: req.query.limit }) });
+});
+
+/** 回退某笔写操作。这是"改错了退回去"的正门,界面上每条流水后面就挂着它。 */
+app.post('/api/agent/undo', (req, res) => {
+  const id = Number(req.body?.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: '要回退的操作号无效' });
+  try {
+    res.json(agentLog.undo(id));
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

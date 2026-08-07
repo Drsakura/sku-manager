@@ -171,6 +171,64 @@ tbody td .btn-sm { padding: 4px 10px; font-size: 13px; }
 }
 .chat-degraded-btn:hover { background: rgba(0, 0, 0, 0.06); }
 
+/* 步骤条:助手这一轮查了/做了哪几步,让人看得见它是查过才答的 */
+.chat-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 5px;
+  font-size: 11.5px;
+  color: var(--fg-mute);
+}
+.chat-step {
+  padding: 1px 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 20px;
+  background: var(--panel-2);
+  white-space: nowrap;
+}
+.chat-step.write { border-color: var(--accent-line); color: var(--accent-ink); background: var(--accent-glow); }
+.chat-step.bad { border-color: var(--warn-line); color: var(--warn-ink); background: var(--warn-bg); }
+.chat-step-sep { color: var(--fg-mute); opacity: 0.5; }
+
+/* 改动卡片:动过库的每一笔都摆出来,后面挂个撤销 */
+.chat-ops { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.chat-op {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  background: var(--accent-glow);
+  font-size: 13px;
+}
+.chat-op.undone { border-color: var(--line-soft); background: var(--panel-2); opacity: 0.62; }
+.chat-op-tag {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-ink);
+  color: var(--panel);
+}
+.chat-op.undone .chat-op-tag { background: var(--fg-mute); }
+.chat-op-text { flex: 1; line-height: 1.5; }
+.chat-op-done { flex: none; font-size: 12px; color: var(--fg-mute); }
+.chat-op-undo {
+  flex: none;
+  padding: 3px 11px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--fg);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.chat-op-undo:hover:not(:disabled) { border-color: var(--warn-line); color: var(--warn-ink); background: var(--warn-bg); }
+.chat-op-undo:disabled { opacity: 0.55; cursor: default; }
+
 /* 依据数据表:答案是方便,这里才是报价依据 */
 .chat-rows { margin-top: 9px; }
 .chat-rows .table-wrap { max-height: 260px; }
