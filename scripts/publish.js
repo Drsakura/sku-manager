@@ -64,16 +64,7 @@ async function main() {
     if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
     await createZip(zipPath);
 
-    const AdmZip = require('adm-zip');
-    const names = new AdmZip(zipPath).getEntries().map((e) => e.entryName);
-    const leaked = names.filter((n) =>
-      /^(data|archive|inbox|versions|dist|node_modules)\//.test(n) || /^\.env/.test(n) ||
-      /\.(db|xlsx|xls|pdf)$/i.test(n) ||
-      // 本机状态文件:发出去会让别人的安装指向不存在的版本/路径
-      /^(current\.txt|config\.json)$/.test(n) ||
-      // 本地开发工具配置
-      /^\.claude\//.test(n)
-    );
+    const { names, leaked } = inspectZip(zipPath);
 
     console.log(`>> 试跑打包: ${path.relative(ROOT, zipPath)}`);
     console.log(`>> 版本 ${version} · ${names.length} 个文件 · ${(fs.statSync(zipPath).size / 1024).toFixed(0)} KB`);
@@ -120,6 +111,18 @@ async function main() {
   if (fs.existsSync(zipPath)) fs.unlinkSync(zipPath);
   await createZip(zipPath);
   console.log(`>> 已打包: ${path.relative(ROOT, zipPath)} (${(fs.statSync(zipPath).size / 1024 / 1024).toFixed(2)} MB)`);
+
+  // 3.5) 泄漏自查。这条以前只在 --dry-run 里跑,而真正上传到公网的是这条路 ——
+  //      走到这里再拦还来得及:zip 还在本地,Release 还没建。
+  {
+    const { leaked } = inspectZip(zipPath);
+    if (leaked.length) {
+      console.error('!! 检测到不该入包的文件,已中止发布:');
+      for (const n of leaked) console.error('     ' + n);
+      process.exit(1);
+    }
+    console.log('>> 泄漏自查通过(无数据文件/密钥/本机状态文件)');
+  }
 
   // 4) sha256
   const sha = crypto
@@ -183,6 +186,36 @@ async function main() {
   }
 
   console.log(`\n完成: https://github.com/${GITHUB_REPO}/releases/tag/${tag}`);
+}
+
+/**
+ * 检查包里有没有不该出去的东西。
+ * 试跑和正式发布都要过这一关 —— 以前只有试跑查,而真正会传上公网的是正式发布那条路。
+ */
+function inspectZip(zipPath) {
+  const AdmZip = require('adm-zip');
+  const zip = new AdmZip(zipPath);
+  const names = zip.getEntries().map((e) => e.entryName);
+
+  const leaked = names.filter((n) =>
+    /^(data|archive|inbox|versions|dist|node_modules)\//.test(n) || /^\.env/.test(n) ||
+    /\.(db|xlsx|xls|pdf)$/i.test(n) ||
+    // 本机状态文件:发出去会让别人的安装指向不存在的版本/路径
+    /^(current\.txt|config\.json)$/.test(n) ||
+    // 本地开发工具配置
+    /^\.claude\//.test(n)
+  );
+
+  // .npmrc 是要随包下发的(里面那行 ignore-scripts 是 Windows 更新能不能成的关键),
+  // 但它也是最容易夹带 registry 令牌的地方 —— 逐行看一眼,带凭据就拦下。
+  for (const n of names.filter((x) => /(^|\/)\.npmrc$/.test(x))) {
+    const body = String(zip.readAsText(n) || '');
+    if (/(_auth|_authToken|_password|:_authToken|\/\/.*:_)/i.test(body)) {
+      leaked.push(`${n}（含 registry 凭据）`);
+    }
+  }
+
+  return { names, leaked };
 }
 
 function createZip(zipPath) {

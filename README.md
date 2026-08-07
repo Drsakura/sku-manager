@@ -312,6 +312,30 @@ npm run publish patch
 **Mac 上 `npm install` 报编译错误**
 先装一次 Xcode 命令行工具:`xcode-select --install`
 
+**Windows 上更新失败,报 `gyp ERR! find Python` / `Could not find any Python installation`**
+
+不需要装 Python,这是 npm 的一个坑。原生模块 `better-sqlite3` 自带各平台预编译二进制,
+并在 package.json 里用 `"gypfile": false` 声明"别自动编译我";**npm 11 认这个字段,
+npm 10(Node 24 自带的版本)不认**,照样去跑 `node-gyp rebuild`,于是在没有
+Python + VS Build Tools 的机器上直接失败。
+
+1.0.7 起包内带了 `.npmrc`(`ignore-scripts=true`)从根上绕开这个行为,
+更新器也改成**依赖没变时直接复用现有 `node_modules`,根本不启动 npm**。
+
+如果你卡在 1.0.5/1.0.6 上(那两版的更新器还是老的),手动补一次即可 ——
+新版代码已经解压在 `data\tmp\staging-<新版本>` 里,只差依赖:
+
+```powershell
+cd <你的安装目录>
+Copy-Item -Recurse -Force versions\<当前版本>\node_modules data\tmp\staging-<新版本>\node_modules
+Move-Item data\tmp\staging-<新版本> versions\<新版本>
+[IO.File]::WriteAllText("$PWD\current.txt", "<新版本>`n")
+node scripts\launch.js
+```
+
+依赖在这几个版本之间没有变化,所以直接复用是安全的。
+也可以顺手把 npm 升级掉:`npm i -g npm@latest`。
+
 **Mac 上双击 `start.command` 没反应**
 终端执行 `chmod +x start.command`。
 
